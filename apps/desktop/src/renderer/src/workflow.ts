@@ -7,6 +7,37 @@ import type {
 } from '@vorchestra/engine';
 import type { ProcessFlowNode } from './ProcessNode';
 
+export function moveListItem<T>(
+  items: readonly T[],
+  fromIndex: number,
+  toIndex: number,
+): T[] {
+  const reordered = [...items];
+  if (
+    fromIndex === toIndex ||
+    fromIndex < 0 ||
+    toIndex < 0 ||
+    fromIndex >= reordered.length ||
+    toIndex >= reordered.length
+  ) {
+    return reordered;
+  }
+
+  const [item] = reordered.splice(fromIndex, 1);
+  if (item !== undefined) reordered.splice(toIndex, 0, item);
+  return reordered;
+}
+
+export function moveRecordEntry<T>(
+  record: Readonly<Record<string, T>>,
+  fromIndex: number,
+  toIndex: number,
+): Record<string, T> {
+  return Object.fromEntries(
+    moveListItem(Object.entries(record), fromIndex, toIndex),
+  );
+}
+
 export function reconcileProcessNodes(
   workflow: WorkflowDefinition,
   currentNodes: readonly ProcessFlowNode[],

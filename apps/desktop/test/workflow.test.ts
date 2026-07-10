@@ -6,6 +6,8 @@ import {
   addInputPort,
   addOutputPort,
   connectBlocks,
+  moveListItem,
+  moveRecordEntry,
   reconcileProcessNodes,
   removeBlock,
   removeInputPort,
@@ -14,6 +16,41 @@ import {
 } from '../src/renderer/src/workflow';
 
 describe('desktop workflow editing', () => {
+  it('reorders invocation items without mutating the original list', () => {
+    const original = ['first', 'input:prompt', 'last'];
+
+    expect(moveListItem(original, 1, 0)).toEqual([
+      'input:prompt',
+      'first',
+      'last',
+    ]);
+    expect(original).toEqual(['first', 'input:prompt', 'last']);
+    expect(moveListItem(original, 0, 2)).toEqual([
+      'input:prompt',
+      'last',
+      'first',
+    ]);
+    expect(moveListItem(original, 0, 3)).toEqual(original);
+  });
+
+  it('reorders environment entries while preserving their values', () => {
+    const environment = {
+      PATH: { source: 'host' as const, name: 'PATH' },
+      MODE: { source: 'literal' as const, value: 'safe' },
+      HOME: { source: 'host' as const, name: 'HOME' },
+    };
+
+    const reordered = moveRecordEntry(environment, 2, 0);
+
+    expect(Object.keys(reordered)).toEqual(['HOME', 'PATH', 'MODE']);
+    expect(reordered).toEqual({
+      HOME: { source: 'host', name: 'HOME' },
+      PATH: { source: 'host', name: 'PATH' },
+      MODE: { source: 'literal', value: 'safe' },
+    });
+    expect(Object.keys(environment)).toEqual(['PATH', 'MODE', 'HOME']);
+  });
+
   it('keeps transient drag position while workflow data and status update', () => {
     const workflow = createWorkflow();
     const initial = reconcileProcessNodes(workflow, [], () => 'idle');

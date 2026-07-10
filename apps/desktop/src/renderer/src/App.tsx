@@ -4,6 +4,8 @@ import {
   useMemo,
   useState,
   type ChangeEvent,
+  type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import {
   Background,
@@ -37,6 +39,7 @@ import {
   FileInput,
   FolderOpen,
   GitBranch,
+  GripVertical,
   Info,
   Layers3,
   LoaderCircle,
@@ -58,6 +61,8 @@ import {
   addInputPort,
   addOutputPort,
   connectBlocks,
+  moveListItem,
+  moveRecordEntry,
   removeBlock,
   removeInputPort,
   removeOutputPort,
@@ -68,6 +73,8 @@ import {
 
 const nodeTypes = { process: ProcessNode };
 type InspectorTab = 'configure' | 'run';
+type ReorderGroup = 'arguments' | 'inputs' | 'outputs' | 'environment';
+type ReorderLocation = { group: ReorderGroup; index: number };
 
 export function App() {
   const [workflow, setWorkflow] = useState<WorkflowDefinition>(createWorkflow);
@@ -507,6 +514,7 @@ export function App() {
             maxZoom={1.8}
             deleteKeyCode={['Backspace', 'Delete']}
             colorMode="dark"
+            proOptions={{ hideAttribution: true }}
           >
             <Background
               variant={BackgroundVariant.Dots}
@@ -670,8 +678,70 @@ function BlockInspector({
   onChange: (block: ProcessBlock) => void;
   onWorkflowChange: (workflow: WorkflowDefinition) => void;
 }) {
+  const [draggedRow, setDraggedRow] = useState<ReorderLocation>();
+  const [dropTarget, setDropTarget] = useState<ReorderLocation>();
+
   const patchInvocation = (patch: Partial<ProcessBlock['invocation']>): void =>
     onChange({ ...block, invocation: { ...block.invocation, ...patch } });
+
+  const startReorder = (
+    group: ReorderGroup,
+    index: number,
+    event: ReactDragEvent<HTMLButtonElement>,
+  ): void => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', `${group}:${index}`);
+    setDraggedRow({ group, index });
+    setDropTarget(undefined);
+  };
+
+  const finishReorder = (): void => {
+    setDraggedRow(undefined);
+    setDropTarget(undefined);
+  };
+
+  const reorderTargetProps = (
+    group: ReorderGroup,
+    index: number,
+    onMove: (fromIndex: number, toIndex: number) => void,
+  ) => ({
+    onDragEnter: (event: ReactDragEvent<HTMLDivElement>) => {
+      if (draggedRow?.group !== group) return;
+      event.preventDefault();
+      setDropTarget({ group, index });
+    },
+    onDragOver: (event: ReactDragEvent<HTMLDivElement>) => {
+      if (draggedRow?.group !== group) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    },
+    onDrop: (event: ReactDragEvent<HTMLDivElement>) => {
+      if (draggedRow?.group !== group) return;
+      event.preventDefault();
+      if (draggedRow.index !== index) onMove(draggedRow.index, index);
+      finishReorder();
+    },
+  });
+
+  const reorderRowClass = (
+    baseClass: string,
+    group: ReorderGroup,
+    index: number,
+  ): string =>
+    [
+      baseClass,
+      'reorder-row',
+      draggedRow?.group === group && draggedRow.index === index
+        ? 'is-dragging'
+        : '',
+      dropTarget?.group === group &&
+      dropTarget.index === index &&
+      draggedRow?.index !== index
+        ? 'is-drop-target'
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
 
   return (
     <div className="inspector-scroll">
@@ -744,7 +814,7 @@ function BlockInspector({
       </InspectorSection>
 
       <InspectorSection
-        title="Literal arguments"
+        title="Arguments"
         action={
           <button
             className="section-action"
@@ -764,7 +834,35 @@ function BlockInspector({
         <div className="argument-list">
           {block.invocation.arguments.map((argument, index) =>
             argument.type === 'literal' ? (
-              <div className="argument-row" key={index}>
+              <div
+                className={reorderRowClass('argument-row', 'arguments', index)}
+                key={index}
+                {...reorderTargetProps('arguments', index, (from, to) =>
+                  patchInvocation({
+                    arguments: moveListItem(
+                      block.invocation.arguments,
+                      from,
+                      to,
+                    ),
+                  }),
+                )}
+              >
+                <ReorderHandle
+                  label={`argument ${index + 1}`}
+                  onDragStart={(event) =>
+                    startReorder('arguments', index, event)
+                  }
+                  onDragEnd={finishReorder}
+                  onMove={(offset) =>
+                    patchInvocation({
+                      arguments: moveListItem(
+                        block.invocation.arguments,
+                        index,
+                        index + offset,
+                      ),
+                    })
+                  }
+                />
                 <span>{index + 1}</span>
                 <input
                   className="mono"
@@ -793,7 +891,39 @@ function BlockInspector({
                 </button>
               </div>
             ) : (
-              <div className="argument-row input-binding" key={index}>
+              <div
+                className={reorderRowClass(
+                  'argument-row input-binding',
+                  'arguments',
+                  index,
+                )}
+                key={`input:${argument.portId}`}
+                {...reorderTargetProps('arguments', index, (from, to) =>
+                  patchInvocation({
+                    arguments: moveListItem(
+                      block.invocation.arguments,
+                      from,
+                      to,
+                    ),
+                  }),
+                )}
+              >
+                <ReorderHandle
+                  label={`input argument ${argument.portId}`}
+                  onDragStart={(event) =>
+                    startReorder('arguments', index, event)
+                  }
+                  onDragEnd={finishReorder}
+                  onMove={(offset) =>
+                    patchInvocation({
+                      arguments: moveListItem(
+                        block.invocation.arguments,
+                        index,
+                        index + offset,
+                      ),
+                    })
+                  }
+                />
                 <span>{index + 1}</span>
                 <code>input:{argument.portId}</code>
                 <small>bound port</small>
@@ -817,9 +947,29 @@ function BlockInspector({
           </button>
         }
       >
-        {block.inputs.map((port) => (
-          <div className="port-editor" key={port.id}>
+        {block.inputs.map((port, index) => (
+          <div
+            className={reorderRowClass('port-editor', 'inputs', index)}
+            key={port.id}
+            {...reorderTargetProps('inputs', index, (from, to) =>
+              onChange({
+                ...block,
+                inputs: moveListItem(block.inputs, from, to),
+              }),
+            )}
+          >
             <div className={`kind-bar kind-${port.artifactKind}`} />
+            <ReorderHandle
+              label={`input port ${port.name}`}
+              onDragStart={(event) => startReorder('inputs', index, event)}
+              onDragEnd={finishReorder}
+              onMove={(offset) =>
+                onChange({
+                  ...block,
+                  inputs: moveListItem(block.inputs, index, index + offset),
+                })
+              }
+            />
             <input
               value={port.name}
               aria-label="Input name"
@@ -907,13 +1057,37 @@ function BlockInspector({
           </button>
         }
       >
-        {block.outputs.map((port) => {
+        {block.outputs.map((port, index) => {
           const binding = block.invocation.outputs.find(
             (candidate) => candidate.portId === port.id,
           );
           return (
-            <div className="port-editor output-editor" key={port.id}>
+            <div
+              className={reorderRowClass(
+                'port-editor output-editor',
+                'outputs',
+                index,
+              )}
+              key={port.id}
+              {...reorderTargetProps('outputs', index, (from, to) =>
+                onChange({
+                  ...block,
+                  outputs: moveListItem(block.outputs, from, to),
+                }),
+              )}
+            >
               <div className={`kind-bar kind-${port.artifactKind}`} />
+              <ReorderHandle
+                label={`output port ${port.name}`}
+                onDragStart={(event) => startReorder('outputs', index, event)}
+                onDragEnd={finishReorder}
+                onMove={(offset) =>
+                  onChange({
+                    ...block,
+                    outputs: moveListItem(block.outputs, index, index + offset),
+                  })
+                }
+              />
               <input
                 value={port.name}
                 aria-label="Output name"
@@ -1021,24 +1195,63 @@ function BlockInspector({
           </button>
         }
       >
-        {Object.entries(block.invocation.environment).map(([key, value]) => (
-          <EnvironmentRow
-            key={key}
-            name={key}
-            value={value}
-            onChange={(nextName, nextValue) => {
-              const environment = { ...block.invocation.environment };
-              delete environment[key];
-              environment[nextName] = nextValue;
-              patchInvocation({ environment });
-            }}
-            onRemove={() => {
-              const environment = { ...block.invocation.environment };
-              delete environment[key];
-              patchInvocation({ environment });
-            }}
-          />
-        ))}
+        {Object.entries(block.invocation.environment).map(
+          ([key, value], index) => (
+            <div
+              className={reorderRowClass(
+                'environment-row',
+                'environment',
+                index,
+              )}
+              key={key}
+              {...reorderTargetProps('environment', index, (from, to) =>
+                patchInvocation({
+                  environment: moveRecordEntry(
+                    block.invocation.environment,
+                    from,
+                    to,
+                  ),
+                }),
+              )}
+            >
+              <ReorderHandle
+                label={`environment variable ${key}`}
+                onDragStart={(event) =>
+                  startReorder('environment', index, event)
+                }
+                onDragEnd={finishReorder}
+                onMove={(offset) =>
+                  patchInvocation({
+                    environment: moveRecordEntry(
+                      block.invocation.environment,
+                      index,
+                      index + offset,
+                    ),
+                  })
+                }
+              />
+              <EnvironmentRow
+                name={key}
+                value={value}
+                onChange={(nextName, nextValue) => {
+                  const environment = { ...block.invocation.environment };
+                  const entries = Object.entries(environment).map(
+                    ([candidateName, candidateValue]) =>
+                      candidateName === key
+                        ? ([nextName, nextValue] as const)
+                        : ([candidateName, candidateValue] as const),
+                  );
+                  patchInvocation({ environment: Object.fromEntries(entries) });
+                }}
+                onRemove={() => {
+                  const environment = { ...block.invocation.environment };
+                  delete environment[key];
+                  patchInvocation({ environment });
+                }}
+              />
+            </div>
+          ),
+        )}
         {Object.keys(block.invocation.environment).length === 0 && (
           <EmptyLine text="No environment access declared" />
         )}
@@ -1053,6 +1266,41 @@ function BlockInspector({
 
 type EnvironmentValue = ProcessBlock['invocation']['environment'][string];
 
+function ReorderHandle({
+  label,
+  onDragStart,
+  onDragEnd,
+  onMove,
+}: {
+  label: string;
+  onDragStart: (event: ReactDragEvent<HTMLButtonElement>) => void;
+  onDragEnd: () => void;
+  onMove: (offset: -1 | 1) => void;
+}) {
+  const handleKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ): void => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    onMove(event.key === 'ArrowUp' ? -1 : 1);
+  };
+
+  return (
+    <button
+      type="button"
+      className="reorder-handle"
+      draggable
+      aria-label={`Reorder ${label}`}
+      title="Drag to reorder; use Up and Down arrow keys for keyboard control"
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onKeyDown={handleKeyDown}
+    >
+      <GripVertical size={14} />
+    </button>
+  );
+}
+
 function EnvironmentRow({
   name,
   value,
@@ -1066,7 +1314,7 @@ function EnvironmentRow({
 }) {
   const source = value.source === 'input' ? 'host' : value.source;
   return (
-    <div className="environment-row">
+    <>
       <input
         className="mono"
         value={name}
@@ -1109,7 +1357,7 @@ function EnvironmentRow({
       <button className="icon-button" onClick={onRemove}>
         <Trash2 size={13} />
       </button>
-    </div>
+    </>
   );
 }
 
