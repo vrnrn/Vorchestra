@@ -1,0 +1,35 @@
+{
+  "name": "vorchestra",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A visual operating system for local automation.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "desktop:smoke": "npm run build && node scripts/run-electron-smoke.mjs",
+    "dev": "npm run dev --workspace @vorchestra/desktop",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "verify": "npm run format:check && npm run typecheck && npm test",
+    "workflow:check": "npm run build --workspace @vorchestra/engine && node scripts/check-workflow.mjs",
+    "workflow:run": "npm run build --workspace @vorchestra/engine && npm run build --workspace @vorchestra/node-runner && node scripts/run-workflow.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "prettier": "3.9.5",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "electron@43.1.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true
+  }
+}
