@@ -355,6 +355,7 @@ describe('block configuration ordering', () => {
 
     await waitFor(() =>
       expect(window.vorchestra.runWorkflow).toHaveBeenCalledWith({
+        runId: expect.any(String),
         workflow,
         workflowFilePath: '/tmp/parameterized.vorchestra.json',
         runInputs: {
@@ -623,6 +624,7 @@ describe('block configuration ordering', () => {
 
     await waitFor(() =>
       expect(window.vorchestra.runWorkflow).toHaveBeenCalledWith({
+        runId: expect.any(String),
         workflow: expect.objectContaining({
           blocks: [
             expect.objectContaining({

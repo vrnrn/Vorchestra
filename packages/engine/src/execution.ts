@@ -12,6 +12,10 @@ import type {
   WorkflowDefinition,
   WorkflowRunInputs,
 } from './schema.js';
+import {
+  analyzeInvocationTemplate,
+  renderInvocationTemplate,
+} from './invocation-template.js';
 import type {
   BlockSkipReason,
   BlockTerminalState,
@@ -504,10 +508,14 @@ function resolveRunRequest(
       resolvedArguments.push(argument.value);
       continue;
     }
-    const artifact = inputs[argument.portId];
-    if (artifact !== undefined) {
-      resolvedArguments.push(artifactToString(artifact));
+    if (argument.type === 'input') {
+      const artifact = inputs[argument.portId];
+      if (artifact !== undefined) {
+        resolvedArguments.push(artifactToString(artifact));
+      }
+      continue;
     }
+    resolvedArguments.push(resolveInvocationTemplate(argument, block, inputs));
   }
 
   const environment = keyedRecord<string>();
@@ -537,13 +545,20 @@ function resolveRunRequest(
     }
   }
 
-  const stdinArtifact =
-    block.invocation.stdin === undefined
-      ? undefined
-      : inputs[block.invocation.stdin.portId];
   const workingDirectory = block.invocation.workingDirectory;
+  const stdinBinding = block.invocation.stdin;
+  const stdinArtifact =
+    stdinBinding !== undefined && 'portId' in stdinBinding
+      ? inputs[stdinBinding.portId]
+      : undefined;
   const stdin =
-    stdinArtifact === undefined ? undefined : artifactToString(stdinArtifact);
+    stdinBinding === undefined
+      ? undefined
+      : 'portId' in stdinBinding
+        ? stdinArtifact === undefined
+          ? undefined
+          : artifactToString(stdinArtifact)
+        : resolveInvocationTemplate(stdinBinding, block, inputs);
 
   return {
     runId: context.runId,
@@ -556,6 +571,59 @@ function resolveRunRequest(
     ...(stdin === undefined ? {} : { stdin }),
     outputs: resolveOutputSpecs(block),
   };
+}
+
+function resolveInvocationTemplate(
+  binding: {
+    readonly template: string;
+    readonly inputs: Readonly<
+      Record<string, { readonly portId: string } | { readonly value: string }>
+    >;
+  },
+  block: ProcessBlock,
+  inputs: Readonly<Record<string, Artifact>>,
+): string {
+  const analysis = analyzeInvocationTemplate(binding.template);
+  const names = new Set(analysis.placeholders);
+  if (
+    analysis.malformed ||
+    names.size !== analysis.placeholders.length ||
+    analysis.placeholders.some(
+      (name) => !Object.hasOwn(binding.inputs, name),
+    ) ||
+    Object.keys(binding.inputs).some((name) => !names.has(name))
+  ) {
+    throw new ResolutionError({
+      code: 'artifact_routing_failed',
+      message: `Block "${block.id}" has an invalid invocation template.`,
+      nextAction: 'Inspect the template placeholders and their input bindings.',
+    });
+  }
+
+  const values = keyedRecord<string>();
+  for (const [name, inputBinding] of Object.entries(binding.inputs)) {
+    if ('value' in inputBinding) {
+      values[name] = inputBinding.value;
+      continue;
+    }
+    const artifact = inputs[inputBinding.portId];
+    if (artifact === undefined) {
+      const port = block.inputs.find(
+        (candidate) => candidate.id === inputBinding.portId,
+      );
+      if (port?.required === true) {
+        throw new ResolutionError({
+          code: 'artifact_routing_failed',
+          message: `Block "${block.id}" could not resolve required template input "${inputBinding.portId}".`,
+          nextAction: 'Inspect the workflow bindings and upstream artifacts.',
+        });
+      }
+      values[name] = '';
+    } else {
+      values[name] = artifactToString(artifact);
+    }
+  }
+  return renderInvocationTemplate(binding.template, values);
 }
 
 function resolveOutputSpecs(block: ProcessBlock): readonly ProcessOutputSpec[] {

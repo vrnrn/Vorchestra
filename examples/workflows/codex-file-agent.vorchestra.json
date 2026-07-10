@@ -74,10 +74,6 @@
           },
           {
             "type": "literal",
-            "value": "--skip-git-repo-check"
-          },
-          {
-            "type": "literal",
             "value": "Create the directory generated and write generated/report.md containing exactly this single line: Vorchestra real Codex acceptance. Do not create or modify any other files. Then respond briefly that the file was created."
           }
         ],

@@ -90,6 +90,26 @@ describe('local run history', () => {
     await expect(store.list()).resolves.toEqual([]);
   });
 
+  it('retains discoverability until an isolated worktree is safely cleaned', async () => {
+    const filePath = await historyPath();
+    const store = new RunHistoryStore(filePath, {
+      retentionMs: 1,
+      now: () => new Date('2026-07-10T12:00:00.000Z'),
+    });
+    await store.append(retainedWorktreeRecord());
+
+    await expect(store.list()).resolves.toHaveLength(1);
+    await expect(store.clear('workflow-a')).rejects.toThrow(
+      'retained worktrees cannot be cleared',
+    );
+    await store.updateWorktree('worktree-run', 'shared', (worktree) => ({
+      ...worktree,
+      state: 'cleaned',
+    }));
+    await expect(store.clear('workflow-a')).resolves.toBeUndefined();
+    await expect(store.list()).resolves.toEqual([]);
+  });
+
   it('recovers from corrupt persisted data on the next append', async () => {
     const filePath = await historyPath();
     await writeFile(filePath, '{not-json', 'utf8');
@@ -104,6 +124,29 @@ describe('local run history', () => {
     ]);
   });
 });
+
+function retainedWorktreeRecord(): RunHistoryRecord {
+  return {
+    ...record('worktree-run', 'workflow-a', '2026-07-09T11:00:00Z'),
+    worktrees: [
+      {
+        scopeId: 'shared',
+        repositoryRoot: '/workspace/repository',
+        baseCommit: 'abc123',
+        branchName: 'vorchestra/worktree-run/shared',
+        worktreePath: '/workspace/worktrees/worktree-run/shared',
+        createdAt: '2026-07-09T10:59:00Z',
+        sourceIsDirty: false,
+        state: 'retained',
+        reason: 'scope-changed',
+        status: ' M file.txt',
+        headCommit: 'abc123',
+        hasChangesFromBase: true,
+        nextAction: 'Inspect the diff.',
+      },
+    ],
+  };
+}
 
 async function historyPath(): Promise<string> {
   return join(

@@ -3,6 +3,7 @@ import type {
   ProcessBlock,
   WorkflowDefinition,
 } from './schema.js';
+import { analyzeInvocationTemplate } from './invocation-template.js';
 
 export type ValidationIssueCode =
   | 'duplicate_block_id'
@@ -30,6 +31,10 @@ export type ValidationIssueCode =
   | 'output_binding_kind_mismatch'
   | 'multiple_stdout_outputs'
   | 'multiple_stderr_outputs'
+  | 'invocation_template_malformed_placeholder'
+  | 'invocation_template_duplicate_placeholder'
+  | 'invocation_template_missing_input'
+  | 'invocation_template_unknown_input'
   | 'cycle_detected';
 
 export interface ValidationIssue {
@@ -298,18 +303,40 @@ function validateBlockBindings(
         referencedInputs,
         issues,
       );
+    } else if (argument.type === 'template') {
+      validateInvocationTemplate(
+        argument,
+        `blocks[${blockIndex}].invocation.arguments[${argumentIndex}]`,
+        'Argument',
+        block,
+        inputIds,
+        referencedInputs,
+        issues,
+      );
     }
   }
 
   if (block.invocation.stdin !== undefined) {
-    validateInputReference(
-      block.invocation.stdin.portId,
-      `blocks[${blockIndex}].invocation.stdin`,
-      block,
-      inputIds,
-      referencedInputs,
-      issues,
-    );
+    if ('portId' in block.invocation.stdin) {
+      validateInputReference(
+        block.invocation.stdin.portId,
+        `blocks[${blockIndex}].invocation.stdin`,
+        block,
+        inputIds,
+        referencedInputs,
+        issues,
+      );
+    } else {
+      validateInvocationTemplate(
+        block.invocation.stdin,
+        `blocks[${blockIndex}].invocation.stdin`,
+        'Stdin',
+        block,
+        inputIds,
+        referencedInputs,
+        issues,
+      );
+    }
   }
 
   for (const [name, value] of Object.entries(block.invocation.environment)) {
@@ -403,6 +430,71 @@ function validateBlockBindings(
         message: `Output port "${output.id}" on block "${block.id}" has no output binding.`,
         path: `blocks[${blockIndex}].outputs[${portIndex}]`,
       });
+    }
+  }
+}
+
+function validateInvocationTemplate(
+  binding: {
+    readonly template: string;
+    readonly inputs: Readonly<
+      Record<string, { readonly portId: string } | { readonly value: string }>
+    >;
+  },
+  path: string,
+  label: 'Argument' | 'Stdin',
+  block: ProcessBlock,
+  inputIds: ReadonlySet<string>,
+  referencedInputs: Set<string>,
+  issues: ValidationIssue[],
+): void {
+  const analysis = analyzeInvocationTemplate(binding.template);
+  if (analysis.malformed) {
+    issues.push({
+      code: 'invocation_template_malformed_placeholder',
+      message: `${label} template on block "${block.id}" contains a malformed placeholder. Use {{name}} with a portable name.`,
+      path: `${path}.template`,
+    });
+  }
+
+  const occurrences = new Map<string, number>();
+  for (const name of analysis.placeholders) {
+    occurrences.set(name, (occurrences.get(name) ?? 0) + 1);
+  }
+  for (const [name, count] of occurrences) {
+    if (count > 1) {
+      issues.push({
+        code: 'invocation_template_duplicate_placeholder',
+        message: `${label} template placeholder "${name}" appears more than once on block "${block.id}".`,
+        path: `${path}.template`,
+      });
+    }
+    if (!Object.hasOwn(binding.inputs, name)) {
+      issues.push({
+        code: 'invocation_template_missing_input',
+        message: `${label} template placeholder "${name}" has no input binding on block "${block.id}".`,
+        path: `${path}.inputs`,
+      });
+    }
+  }
+
+  for (const [name, inputBinding] of Object.entries(binding.inputs)) {
+    if (!occurrences.has(name)) {
+      issues.push({
+        code: 'invocation_template_unknown_input',
+        message: `${label} template input "${name}" has no matching placeholder on block "${block.id}".`,
+        path: `${path}.inputs.${name}`,
+      });
+    }
+    if ('portId' in inputBinding) {
+      validateInputReference(
+        inputBinding.portId,
+        `${path}.inputs.${name}`,
+        block,
+        inputIds,
+        referencedInputs,
+        issues,
+      );
     }
   }
 }

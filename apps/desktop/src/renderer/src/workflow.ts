@@ -424,7 +424,13 @@ export function removeInputPort(
         ...block.invocation,
         arguments: block.invocation.arguments.filter(
           (argument) =>
-            !(argument.type === 'input' && argument.portId === portId),
+            !(
+              (argument.type === 'input' && argument.portId === portId) ||
+              (argument.type === 'template' &&
+                Object.values(argument.inputs).some(
+                  (binding) => 'portId' in binding && binding.portId === portId,
+                ))
+            ),
         ),
         environment: Object.fromEntries(
           Object.entries(block.invocation.environment).filter(
@@ -432,7 +438,13 @@ export function removeInputPort(
               !(value.source === 'input' && value.portId === portId),
           ),
         ),
-        ...(block.invocation.stdin?.portId === portId
+        ...(block.invocation.stdin !== undefined &&
+        (('portId' in block.invocation.stdin &&
+          block.invocation.stdin.portId === portId) ||
+          ('inputs' in block.invocation.stdin &&
+            Object.values(block.invocation.stdin.inputs).some(
+              (binding) => 'portId' in binding && binding.portId === portId,
+            )))
           ? { stdin: undefined }
           : {}),
       },

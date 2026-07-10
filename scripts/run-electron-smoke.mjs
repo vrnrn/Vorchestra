@@ -31,13 +31,13 @@ try {
     await runNode(
       'scripts/capture-electron.mjs',
       String(port),
-      'docs/acceptance/V0_2_EDITOR.png',
+      'docs/acceptance/V0_3_EDITOR.png',
     );
     await runNode('scripts/smoke-electron.mjs', String(port));
     await runNode(
       'scripts/capture-electron.mjs',
       String(port),
-      'docs/acceptance/V0_2_DESKTOP.png',
+      'docs/acceptance/V0_3_DESKTOP.png',
     );
 
     await stopElectron(child);

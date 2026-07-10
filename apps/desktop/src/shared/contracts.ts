@@ -58,6 +58,31 @@ export interface RunHistoryRecord {
   readonly outcome: 'succeeded' | 'failed' | 'cancelled';
   readonly blocks: readonly BlockRunSnapshot[];
   readonly runInputs: WorkflowRunInputs;
+  readonly worktrees?: readonly WorktreeRunRecord[];
+}
+
+export interface WorktreeRunRecord {
+  readonly scopeId: string;
+  readonly repositoryRoot: string;
+  readonly baseCommit: string;
+  readonly branchName: string;
+  readonly worktreePath: string;
+  readonly createdAt: string;
+  readonly sourceIsDirty: boolean;
+  readonly state: 'retained' | 'cleaned';
+  readonly reason: string;
+  readonly status: string;
+  readonly headCommit: string;
+  readonly hasChangesFromBase: boolean;
+  readonly nextAction: string;
+}
+
+export interface WorktreeInspectionResult {
+  readonly status: string;
+  readonly diff: string;
+  readonly headCommit: string;
+  readonly hasUncommittedChanges: boolean;
+  readonly hasChangesFromBase: boolean;
 }
 
 export type DesktopRunEvent =
@@ -90,6 +115,7 @@ export interface RunWorkflowResult {
 }
 
 export interface RunWorkflowRequest {
+  readonly runId?: string;
   readonly workflow: WorkflowDefinition;
   readonly runInputs: WorkflowRunInputs;
   readonly workflowFilePath?: string;
@@ -106,6 +132,14 @@ export interface VorchestraBridge {
   revealFilesystemPath(path: string): Promise<void>;
   listRunHistory(workflowId: string): Promise<readonly RunHistoryRecord[]>;
   clearRunHistory(workflowId: string): Promise<void>;
+  inspectRunWorktree(
+    runId: string,
+    scopeId: string,
+  ): Promise<WorktreeInspectionResult>;
+  cleanupRunWorktree(
+    runId: string,
+    scopeId: string,
+  ): Promise<WorktreeRunRecord>;
   preflightWorkflow(
     request: PreflightWorkflowRequest,
   ): Promise<WorkflowPreflightResult>;
@@ -121,6 +155,8 @@ export const IPC_CHANNELS = {
   revealFilesystemPath: 'filesystem:reveal',
   listRunHistory: 'run-history:list',
   clearRunHistory: 'run-history:clear',
+  inspectRunWorktree: 'run-history:worktree-inspect',
+  cleanupRunWorktree: 'run-history:worktree-cleanup',
   preflightWorkflow: 'run:preflight',
   runWorkflow: 'run:start',
   cancelRun: 'run:cancel',

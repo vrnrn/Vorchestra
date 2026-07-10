@@ -172,6 +172,86 @@ test('resolves artifacts into process inputs and routes every v0.1 artifact kind
   );
 });
 
+test('composes argument and stdin templates deterministically from text and JSON artifacts', async () => {
+  const textSource = processBlock(
+    'template-text-source',
+    [],
+    [outputPort('text', 'text')],
+  );
+  const jsonSource = processBlock(
+    'template-json-source',
+    [],
+    [outputPort('data', 'json')],
+  );
+  const sink = processBlock(
+    'template-sink',
+    [inputPort('text', 'text'), inputPort('data', 'json')],
+    [],
+  );
+  sink.invocation.arguments = [
+    {
+      type: 'template',
+      template: '{{instruction}}\nContext:\n{{context}}\nData={{payload}}',
+      inputs: {
+        instruction: { value: 'Analyze exactly.' },
+        context: { portId: 'text' },
+        payload: { portId: 'data' },
+      },
+    },
+  ];
+  sink.invocation.stdin = {
+    template: '<text>{{message}}</text>\n<json>{{json}}</json>',
+    inputs: {
+      message: { portId: 'text' },
+      json: { portId: 'data' },
+    },
+  };
+
+  const requests: ProcessRunRequest[] = [];
+  const result = await executeWorkflow(
+    workflowWith(
+      [textSource, jsonSource, sink],
+      [
+        connection(
+          'template-text',
+          'template-text-source',
+          'text',
+          'template-sink',
+          'text',
+        ),
+        connection(
+          'template-json',
+          'template-json-source',
+          'data',
+          'template-sink',
+          'data',
+        ),
+      ],
+    ),
+    runnerFrom(async (request) => {
+      requests.push(request);
+      if (request.blockId === 'template-text-source') {
+        return succeeded(request, { stdout: 'plain text' });
+      }
+      if (request.blockId === 'template-json-source') {
+        return succeeded(request, { stdout: '{"z":1,"a":[true,null]}' });
+      }
+      return succeeded(request);
+    }),
+    { runId: 'run-templates' },
+  );
+
+  assert.equal(result.outcome, 'succeeded');
+  const request = requests.find(({ blockId }) => blockId === 'template-sink');
+  assert.deepEqual(request?.arguments, [
+    'Analyze exactly.\nContext:\nplain text\nData={"z":1,"a":[true,null]}',
+  ]);
+  assert.equal(
+    request?.stdin,
+    '<text>plain text</text>\n<json>{"z":1,"a":[true,null]}</json>',
+  );
+});
+
 test('starts a downstream block as soon as its own dependency succeeds', async () => {
   const aGate = deferred<void>();
   const bGate = deferred<void>();
@@ -799,6 +879,39 @@ test('omits unconnected optional input bindings from args, stdin, and environmen
   assert.deepEqual(resolvedRequest?.arguments, ['always']);
   assert.equal(resolvedRequest?.stdin, undefined);
   assert.deepEqual(Object.keys(resolvedRequest?.environment ?? {}), []);
+});
+
+test('renders unconnected optional template inputs as empty strings', async () => {
+  const block = processBlock(
+    'optional-template',
+    [inputPort('maybe', 'text', false)],
+    [],
+  );
+  block.invocation.arguments = [
+    {
+      type: 'template',
+      template: 'before{{value}}after',
+      inputs: { value: { portId: 'maybe' } },
+    },
+  ];
+  block.invocation.stdin = {
+    template: 'prefix\n{{value}}\nsuffix',
+    inputs: { value: { portId: 'maybe' } },
+  };
+  let resolvedRequest: ProcessRunRequest | undefined;
+
+  const result = await executeWorkflow(
+    workflowWith([block]),
+    runnerFrom(async (request) => {
+      resolvedRequest = request;
+      return succeeded(request);
+    }),
+    { runId: 'run-optional-template' },
+  );
+
+  assert.equal(result.outcome, 'succeeded');
+  assert.deepEqual(resolvedRequest?.arguments, ['beforeafter']);
+  assert.equal(resolvedRequest?.stdin, 'prefix\n\nsuffix');
 });
 
 test('rejects malformed runner artifacts instead of routing them', async () => {

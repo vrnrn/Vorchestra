@@ -11,7 +11,7 @@ if (process.platform !== 'darwin') {
 }
 
 const desktopDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const source = join(desktopDirectory, 'build/icon.svg');
+const source = join(desktopDirectory, 'build/icon.png');
 const destination = join(desktopDirectory, 'build/icon.icns');
 const temporaryDirectory = await mkdtemp(join(tmpdir(), 'vorchestra-icon-'));
 const sourcePng = join(temporaryDirectory, 'icon-1024.png');

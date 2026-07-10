@@ -65,7 +65,7 @@ describe('v0.2 primary editor accessibility acceptance', () => {
   });
 
   it('gives the primary editor controls stable accessible names and keyboard focus', () => {
-    const { getByLabelText, getByRole } = render(<App />);
+    const { container, getByLabelText, getByRole } = render(<App />);
     const namedControls = [
       'New',
       'Open',
@@ -91,6 +91,9 @@ describe('v0.2 primary editor accessibility acceptance', () => {
     expect(
       getByRole('region', { name: 'Local run history' }),
     ).toBeInTheDocument();
+    expect(
+      getByRole('toolbar', { name: 'Block and canvas controls' }),
+    ).toBeInTheDocument();
     expect(getByLabelText('Workflow name')).toHaveAccessibleName(
       'Workflow name',
     );
@@ -99,6 +102,11 @@ describe('v0.2 primary editor accessibility acceptance', () => {
       const control = getByRole('button', { name });
       expect(control).toHaveAccessibleName(name);
       expect(control.tabIndex).toBe(0);
+    }
+
+    for (const control of container.querySelectorAll('.toolbar-button')) {
+      expect(control).toHaveAttribute('data-tooltip');
+      expect(control.getAttribute('data-tooltip')).not.toBe('');
     }
   });
 

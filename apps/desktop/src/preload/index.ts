@@ -41,6 +41,10 @@ const bridge: VorchestraBridge = {
       IPC_CHANNELS.clearRunHistory,
       workflowId,
     ) as Promise<void>,
+  inspectRunWorktree: (runId, scopeId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.inspectRunWorktree, runId, scopeId),
+  cleanupRunWorktree: (runId, scopeId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.cleanupRunWorktree, runId, scopeId),
   preflightWorkflow: (request: PreflightWorkflowRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.preflightWorkflow, request),
   runWorkflow: (request) =>

@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowRight, TerminalSquare } from 'lucide-react';
 
 export interface InvocationArgumentPreview {
   readonly position: number;
-  readonly source: 'literal' | 'input';
+  readonly source: 'literal' | 'input' | 'template';
   readonly value: string;
 }
 
@@ -44,7 +44,9 @@ export function buildInvocationPreview(
       value:
         argument.type === 'literal'
           ? argument.value
-          : `input:${argument.portId}`,
+          : argument.type === 'input'
+            ? `input:${argument.portId}`
+            : renderTemplatePreview(argument.template, argument.inputs),
     })),
     shell: block.invocation.shell,
     shellSyntax: detectShellSyntax(literalArguments),
@@ -54,7 +56,15 @@ export function buildInvocationPreview(
       'application working directory',
     ...(block.invocation.stdin === undefined
       ? {}
-      : { stdin: block.invocation.stdin.portId }),
+      : {
+          stdin:
+            'portId' in block.invocation.stdin
+              ? block.invocation.stdin.portId
+              : `template:${renderTemplatePreview(
+                  block.invocation.stdin.template,
+                  block.invocation.stdin.inputs,
+                )}`,
+        }),
     environment: Object.entries(block.invocation.environment).map(
       ([name, value]) => ({
         name,
@@ -130,7 +140,11 @@ export function InvocationPreview({
         <dd>{preview.workingDirectory}</dd>
         <dt>stdin</dt>
         <dd>
-          {preview.stdin === undefined ? 'none' : `input:${preview.stdin}`}
+          {preview.stdin === undefined
+            ? 'none'
+            : preview.stdin.startsWith('template:')
+              ? preview.stdin
+              : `input:${preview.stdin}`}
         </dd>
         {preview.environment.map((entry) => (
           <div key={entry.name} className="invocation-environment-row">
@@ -161,6 +175,20 @@ export function InvocationPreview({
         </div>
       )}
     </section>
+  );
+}
+
+function renderTemplatePreview(
+  template: string,
+  inputs: Readonly<Record<string, { portId: string } | { value: string }>>,
+): string {
+  return template.replace(
+    /\{\{([A-Za-z_][A-Za-z0-9_-]*)\}\}/g,
+    (placeholder, name: string) => {
+      const binding = inputs[name];
+      if (binding === undefined) return placeholder;
+      return 'value' in binding ? binding.value : `⟨input:${binding.portId}⟩`;
+    },
   );
 }
 

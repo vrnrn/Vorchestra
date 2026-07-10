@@ -29,7 +29,9 @@ import {
   type BlockPreflightPreview,
   type BlockExecutionState,
   type ExecutionFailure,
+  type ProcessArgument,
   type ProcessBlock,
+  type ProcessStdin,
   type WorkflowPreflightResult,
   type WorkflowRunInputs,
   type WorkflowDefinition,
@@ -74,11 +76,16 @@ import type {
   RunHistoryRecord,
 } from '../../shared/contracts';
 import {
+  AGENT_RUNTIME_REGISTRY,
+  agentEditorConfigFromBlock,
   compileAgentBlock,
+  getAgentBlockMetadataIssue,
   getAgentBlockPresentation,
   removeBlockPresentation,
   setAgentBlockPresentation,
+  type AgentBlockMetadataIssue,
   type AgentBlockPresentation,
+  type AgentRuntimeId,
 } from '../../shared/agent-runtime';
 import { createProcessBlock, createWorkflow } from '../../shared/defaults';
 import { AgentBlockInspector } from './AgentBlockInspector';
@@ -160,6 +167,7 @@ export function App() {
     'succeeded' | 'failed' | 'cancelled'
   >();
   const [runPreviewOpen, setRunPreviewOpen] = useState(false);
+  const [plannedRunId, setPlannedRunId] = useState(() => crypto.randomUUID());
   const [trustConfirmed, setTrustConfirmed] = useState(false);
   const [runInputValues, setRunInputValues] = useState<
     Readonly<Record<string, string>>
@@ -182,6 +190,10 @@ export function App() {
     selectedBlock === undefined
       ? undefined
       : getAgentBlockPresentation(workflow, selectedBlock.id);
+  const selectedMetadataIssue =
+    selectedBlock === undefined
+      ? undefined
+      : getAgentBlockMetadataIssue(workflow, selectedBlock.id);
   const runInputBuild = useMemo(
     () => buildWorkflowRunInputs(workflow, runInputValues),
     [runInputValues, workflow],
@@ -276,6 +288,7 @@ export function App() {
             pasted.workflow,
             pasted.blockId,
             blockClipboardPresentation.agentRuntime,
+            blockClipboardPresentation.isolation,
           );
     setHistory(pushWorkflowHistory(history, nextWorkflow));
     setSelectedBlockId(pasted.blockId);
@@ -295,6 +308,7 @@ export function App() {
             duplicated.workflow,
             duplicated.blockId,
             presentation.agentRuntime,
+            presentation.isolation,
           );
     setHistory(pushWorkflowHistory(history, nextWorkflow));
     setSelectedBlockId(duplicated.blockId);
@@ -356,6 +370,7 @@ export function App() {
     setPreflightLoading(true);
     void window.vorchestra
       .preflightWorkflow({
+        runId: plannedRunId,
         workflow,
         runInputs: runInputBuild.inputs,
         ...(filePath === undefined ? {} : { workflowFilePath: filePath }),
@@ -375,7 +390,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [filePath, runInputBuild.inputs, workflow]);
+  }, [filePath, plannedRunId, runInputBuild.inputs, workflow]);
 
   useEffect(() => {
     if (dirty) {
@@ -596,6 +611,7 @@ export function App() {
       textContext: { portId: 'context', name: 'Context' },
       textResponse: { portId: 'response', name: 'Response' },
       filesystemOutputs: [],
+      isolation: { mode: 'current-directory' },
     });
     changeWorkflow((current) =>
       setAgentBlockPresentation(
@@ -614,6 +630,7 @@ export function App() {
         },
         block.id,
         'codex',
+        { mode: 'current-directory' },
       ),
     );
     setSelectedBlockId(block.id);
@@ -706,11 +723,13 @@ export function App() {
       setRunOutcome(undefined);
       setSelectedRunId(undefined);
       const result = await window.vorchestra.runWorkflow({
+        runId: plannedRunId,
         workflow,
         runInputs: runInputBuild.inputs,
         ...(filePath === undefined ? {} : { workflowFilePath: filePath }),
       });
       setActiveRunId(result.runId);
+      setPlannedRunId(crypto.randomUUID());
       setRunPreviewOpen(false);
       setTrustConfirmed(false);
       setInspectorTab('run');
@@ -749,7 +768,7 @@ export function App() {
             <Layers3 size={18} />
           </div>
           <span>VORCHESTRA</span>
-          <em>v0.2</em>
+          <em>v0.3</em>
         </div>
         <div className="document-title">
           <input
@@ -803,34 +822,6 @@ export function App() {
             disabled={!canRedo}
             onClick={redo}
           />
-          <ToolbarButton
-            icon={<Copy size={15} />}
-            label="Copy block"
-            title="Copy selected block (Cmd/Ctrl-C)"
-            disabled={selectedBlock === undefined}
-            onClick={copySelectedBlock}
-          />
-          <ToolbarButton
-            icon={<ClipboardPaste size={15} />}
-            label="Paste block"
-            title="Paste copied block (Cmd/Ctrl-V)"
-            disabled={blockClipboard === undefined}
-            onClick={pasteCopiedBlock}
-          />
-          <ToolbarButton
-            icon={<Files size={15} />}
-            label="Duplicate block"
-            title="Duplicate selected block (Cmd/Ctrl-D)"
-            disabled={selectedBlock === undefined}
-            onClick={duplicateSelectedBlock}
-          />
-          <ToolbarButton
-            icon={<Network size={15} />}
-            label="Auto arrange"
-            title="Arrange workflow by dependency layer"
-            disabled={workflow.blocks.length === 0}
-            onClick={autoArrange}
-          />
           <span className="toolbar-separator" />
           {isRunning ? (
             <button className="button danger" onClick={() => void cancelRun()}>
@@ -852,6 +843,44 @@ export function App() {
           )}
         </div>
       </header>
+
+      <div
+        className="editor-toolbar"
+        role="toolbar"
+        aria-label="Block and canvas controls"
+      >
+        <span className="editor-toolbar-label">BLOCK</span>
+        <ToolbarButton
+          icon={<Copy size={15} />}
+          label="Copy block"
+          title="Copy selected block (Cmd/Ctrl-C)"
+          disabled={selectedBlock === undefined}
+          onClick={copySelectedBlock}
+        />
+        <ToolbarButton
+          icon={<ClipboardPaste size={15} />}
+          label="Paste block"
+          title="Paste copied block (Cmd/Ctrl-V)"
+          disabled={blockClipboard === undefined}
+          onClick={pasteCopiedBlock}
+        />
+        <ToolbarButton
+          icon={<Files size={15} />}
+          label="Duplicate block"
+          title="Duplicate selected block (Cmd/Ctrl-D)"
+          disabled={selectedBlock === undefined}
+          onClick={duplicateSelectedBlock}
+        />
+        <span className="toolbar-separator" />
+        <span className="editor-toolbar-label">CANVAS</span>
+        <ToolbarButton
+          icon={<Network size={15} />}
+          label="Auto arrange"
+          title="Arrange workflow by dependency layer"
+          disabled={workflow.blocks.length === 0}
+          onClick={autoArrange}
+        />
+      </div>
 
       <section className="workspace">
         <aside className="rail">
@@ -953,6 +982,8 @@ export function App() {
               }
               setNotice(`Viewing retained run ${record.runId}.`);
             }}
+            onReveal={(path) => void revealArtifact(path)}
+            onWorktreeChanged={() => void refreshRunHistory()}
             onClear={() => {
               void window.vorchestra
                 .clearRunHistory(workflow.id)
@@ -1120,34 +1151,71 @@ export function App() {
               >
                 {inspectorTab === 'configure' ? (
                   selectedPresentation === undefined ? (
-                    <BlockInspector
-                      block={selectedBlock}
-                      workflow={workflow}
-                      {...(preflight?.blocks.find(
-                        (block) => block.blockId === selectedBlock.id,
-                      ) === undefined
-                        ? {}
-                        : {
-                            resolved: preflight.blocks.find(
-                              (block) => block.blockId === selectedBlock.id,
-                            )!,
-                          })}
-                      selectPath={selectFilesystemPath}
-                      onChange={(block) =>
-                        changeWorkflow((current) =>
-                          replaceBlock(current, block),
-                        )
-                      }
-                      onWorkflowChange={(next) => changeWorkflow(() => next)}
-                    />
+                    selectedMetadataIssue?.code === 'runtime-unsupported' ? (
+                      <UnsupportedAgentRuntimeInspector
+                        issue={selectedMetadataIssue}
+                        onChoose={(agentRuntime) =>
+                          changeWorkflow((current) =>
+                            setAgentBlockPresentation(
+                              replaceBlock(
+                                current,
+                                compileAgentBlock(
+                                  agentEditorConfigFromBlock(selectedBlock, {
+                                    kind: 'ai-agent',
+                                    agentRuntime,
+                                    isolation: {
+                                      mode: 'current-directory',
+                                    },
+                                  }),
+                                ),
+                              ),
+                              selectedBlock.id,
+                              agentRuntime,
+                              { mode: 'current-directory' },
+                            ),
+                          )
+                        }
+                        onTreatAsProcess={() =>
+                          changeWorkflow((current) =>
+                            removeBlockPresentation(current, selectedBlock.id),
+                          )
+                        }
+                      />
+                    ) : (
+                      <BlockInspector
+                        block={selectedBlock}
+                        workflow={workflow}
+                        {...(preflight?.blocks.find(
+                          (block) => block.blockId === selectedBlock.id,
+                        ) === undefined
+                          ? {}
+                          : {
+                              resolved: preflight.blocks.find(
+                                (block) => block.blockId === selectedBlock.id,
+                              )!,
+                            })}
+                        selectPath={selectFilesystemPath}
+                        onChange={(block) =>
+                          changeWorkflow((current) =>
+                            replaceBlock(current, block),
+                          )
+                        }
+                        onWorkflowChange={(next) => changeWorkflow(() => next)}
+                      />
+                    )
                   ) : (
                     <AgentBlockInspector
                       block={selectedBlock}
                       presentation={selectedPresentation}
                       selectPath={selectFilesystemPath}
-                      onChange={(block) =>
+                      onChange={(block, presentation) =>
                         changeWorkflow((current) =>
-                          replaceBlock(current, block),
+                          setAgentBlockPresentation(
+                            replaceBlock(current, block),
+                            block.id,
+                            presentation.agentRuntime,
+                            presentation.isolation,
+                          ),
                         )
                       }
                     />
@@ -1233,7 +1301,15 @@ export function App() {
               setNotice(`Provide run input ${inputId}.`);
               return;
             }
-            if (blockId !== undefined) navigateToInspectorField(blockId, field);
+            if (blockId !== undefined) {
+              const agent = getAgentBlockPresentation(workflow, blockId);
+              navigateToInspectorField(
+                blockId,
+                agent !== undefined && field === 'invocation.executable'
+                  ? 'editor.agentRuntime'
+                  : field,
+              );
+            }
             setRunPreviewOpen(false);
             setTrustConfirmed(false);
             setNotice(`Review ${field}.`);
@@ -1321,6 +1397,60 @@ function handleInspectorTabKeyDown(
   const tabId =
     next === 'configure' ? 'inspector-configure-tab' : 'inspector-run-tab';
   requestAnimationFrame(() => document.getElementById(tabId)?.focus());
+}
+
+function UnsupportedAgentRuntimeInspector({
+  issue,
+  onChoose,
+  onTreatAsProcess,
+}: {
+  issue: AgentBlockMetadataIssue;
+  onChoose: (runtime: AgentRuntimeId) => void;
+  onTreatAsProcess: () => void;
+}) {
+  const [runtime, setRuntime] = useState<AgentRuntimeId>('codex');
+  return (
+    <div className="inspector-scroll">
+      <section className="inspector-section">
+        <header>
+          <span>Unsupported Agent runtime</span>
+        </header>
+        <div className="agent-authority-warning">
+          <AlertTriangle size={14} />
+          <span>{issue.message}</span>
+        </div>
+        <label className="field">
+          <span>Replacement runtime</span>
+          <select
+            data-inspector-field="editor.agentRuntime"
+            aria-label="Replacement Agent runtime"
+            value={runtime}
+            onChange={(event) =>
+              setRuntime(event.target.value as AgentRuntimeId)
+            }
+          >
+            {AGENT_RUNTIME_REGISTRY.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.displayName}
+              </option>
+            ))}
+          </select>
+          <small>
+            The saved metadata is preserved until you explicitly choose how to
+            recover this block.
+          </small>
+        </label>
+        <div className="unsupported-agent-actions">
+          <button className="button primary" onClick={() => onChoose(runtime)}>
+            Use selected runtime
+          </button>
+          <button className="button" onClick={onTreatAsProcess}>
+            Treat as generic process
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function BlockInspector({
@@ -1577,7 +1707,7 @@ function BlockInspector({
                   <X size={13} />
                 </button>
               </div>
-            ) : (
+            ) : argument.type === 'input' ? (
               <div
                 className={reorderRowClass(
                   'argument-row input-binding',
@@ -1614,6 +1744,46 @@ function BlockInspector({
                 <span>{index + 1}</span>
                 <code>input:{argument.portId}</code>
                 <small>bound port</small>
+              </div>
+            ) : (
+              <div
+                className={reorderRowClass(
+                  'argument-row input-binding',
+                  'arguments',
+                  index,
+                )}
+                key={`template:${index}`}
+                {...reorderTargetProps('arguments', index, (from, to) =>
+                  patchInvocation({
+                    arguments: moveListItem(
+                      block.invocation.arguments,
+                      from,
+                      to,
+                    ),
+                  }),
+                )}
+              >
+                <ReorderHandle
+                  label={`template argument ${index + 1}`}
+                  onDragStart={(event) =>
+                    startReorder('arguments', index, event)
+                  }
+                  onDragEnd={finishReorder}
+                  onMove={(offset) =>
+                    patchInvocation({
+                      arguments: moveListItem(
+                        block.invocation.arguments,
+                        index,
+                        index + offset,
+                      ),
+                    })
+                  }
+                />
+                <span>{index + 1}</span>
+                <code>template:{argument.template}</code>
+                <small>
+                  {Object.keys(argument.inputs).length} template bindings
+                </small>
               </div>
             ),
           )}
@@ -1694,15 +1864,10 @@ function BlockInspector({
             <select
               data-inspector-field={`inputs[${index}].delivery`}
               aria-label="Input delivery"
-              value={
-                block.invocation.stdin?.portId === port.id
-                  ? 'stdin'
-                  : 'argument'
-              }
+              value={inputDelivery(block, port.id)}
               onChange={(event) => {
                 const without = block.invocation.arguments.filter(
-                  (argument) =>
-                    !(argument.type === 'input' && argument.portId === port.id),
+                  (argument) => !argumentUsesInputPort(argument, port.id),
                 );
                 patchInvocation({
                   arguments:
@@ -1712,7 +1877,7 @@ function BlockInspector({
                   stdin:
                     event.target.value === 'stdin'
                       ? { portId: port.id }
-                      : block.invocation.stdin?.portId === port.id
+                      : stdinUsesInputPort(block.invocation.stdin, port.id)
                         ? undefined
                         : block.invocation.stdin,
                 });
@@ -1720,6 +1885,9 @@ function BlockInspector({
             >
               <option value="argument">Argument</option>
               <option value="stdin">stdin</option>
+              {inputDelivery(block, port.id) === 'template' && (
+                <option value="template">Template</option>
+              )}
             </select>
             <button
               className="icon-button"
@@ -2447,6 +2615,7 @@ function RunPreview({
                         )!,
                       })}
                 />
+                <AgentIsolationPreview workflow={workflow} blockId={block.id} />
               </div>
             </article>
           ))}
@@ -2479,6 +2648,71 @@ function RunPreview({
         </footer>
       </section>
     </div>
+  );
+}
+
+function AgentIsolationPreview({
+  workflow,
+  blockId,
+}: {
+  workflow: WorkflowDefinition;
+  blockId: string;
+}) {
+  const presentation = getAgentBlockPresentation(workflow, blockId);
+  const isolation = presentation?.isolation;
+  if (isolation?.mode !== 'workflow-run-worktree') return null;
+  return (
+    <div className="isolation-preview">
+      <GitBranch size={12} />
+      <span>
+        <strong>Workflow-run worktree · {isolation.scope}</strong>
+        <small>
+          {isolation.repositoryRoot} @ {isolation.baseRef}
+        </small>
+        <small>
+          A run-scoped branch and worktree will be created before this process
+          starts. Vorchestra will not commit, merge, push, or discard changes.
+        </small>
+      </span>
+    </div>
+  );
+}
+
+function inputDelivery(
+  block: ProcessBlock,
+  portId: string,
+): 'argument' | 'stdin' | 'template' {
+  if (stdinUsesInputPort(block.invocation.stdin, portId)) return 'stdin';
+  if (
+    block.invocation.arguments.some(
+      (argument) =>
+        argument.type === 'template' && argumentUsesInputPort(argument, portId),
+    )
+  ) {
+    return 'template';
+  }
+  return 'argument';
+}
+
+function argumentUsesInputPort(
+  argument: ProcessArgument,
+  portId: string,
+): boolean {
+  if (argument.type === 'input') return argument.portId === portId;
+  if (argument.type !== 'template') return false;
+  return Object.values(argument.inputs).some(
+    (binding) => 'portId' in binding && binding.portId === portId,
+  );
+}
+
+function stdinUsesInputPort(
+  stdin: ProcessStdin | undefined,
+  portId: string,
+): boolean {
+  if (stdin === undefined) return false;
+  if ('portId' in stdin) return stdin.portId === portId;
+  return Object.values(stdin.inputs).some(
+    (binding) => 'portId' in binding && binding.portId === portId,
   );
 }
 
@@ -2617,7 +2851,7 @@ function ToolbarButton({
     <button
       className="toolbar-button"
       aria-label={label}
-      title={title}
+      data-tooltip={title ?? label}
       disabled={disabled}
       onClick={onClick}
     >

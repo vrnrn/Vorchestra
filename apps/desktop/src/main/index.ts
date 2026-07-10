@@ -19,6 +19,7 @@ import {
   type RunHistoryRecord,
   type RunWorkflowRequest,
   type WorkflowFileResult,
+  type WorktreeRunRecord,
 } from '../shared/contracts.js';
 import { revealFilesystemPath, selectFilesystemPath } from './path-actions.js';
 import {
@@ -30,6 +31,17 @@ import { ActiveRunRegistry } from './run-registry.js';
 import { RunHistoryStore } from './run-history.js';
 import { readWorkflowFile, writeWorkflowFile } from './workflow-files.js';
 import { applyApplicationIdentity } from './application-identity.js';
+import {
+  applyAgentWorktreePreviews,
+  finalizeAgentWorktrees,
+  preflightAgentWorktrees,
+  prepareAgentWorktrees,
+} from './agent-worktrees.js';
+import {
+  WorktreeRuntime,
+  WorktreeRuntimeError,
+  type WorktreeScope,
+} from './worktree-runtime.js';
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const activeRuns = new ActiveRunRegistry();
@@ -163,6 +175,41 @@ function registerIpc(runHistory: RunHistoryStore): void {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.inspectRunWorktree,
+    async (_event, runId: string, scopeId: string) => {
+      const located = await findRetainedWorktree(runHistory, runId, scopeId);
+      return new WorktreeRuntime().inspect(
+        worktreeScopeFromRecord(runId, located.worktree),
+      );
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.cleanupRunWorktree,
+    async (_event, runId: string, scopeId: string) => {
+      const located = await findRetainedWorktree(runHistory, runId, scopeId);
+      const retainedArtifactPaths = located.record.blocks.flatMap((block) =>
+        block.artifacts.flatMap((artifact) =>
+          artifact.kind === 'filesystem-reference' ? [artifact.path] : [],
+        ),
+      );
+      await new WorktreeRuntime().cleanup(
+        worktreeScopeFromRecord(runId, located.worktree),
+        { retainedArtifactPaths },
+      );
+      return runHistory.updateWorktree(runId, scopeId, (current) => ({
+        ...current,
+        state: 'cleaned',
+        reason: 'safe-cleanup',
+        status: '',
+        hasChangesFromBase: false,
+        nextAction:
+          'The clean worktree and its run-scoped branch were removed.',
+      }));
+    },
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.preflightWorkflow,
     async (_event, input: unknown): Promise<WorkflowPreflightResult> => {
       const request = input as Partial<PreflightWorkflowRequest>;
@@ -175,36 +222,75 @@ function registerIpc(runHistory: RunHistoryStore): void {
         baseDirectory,
       );
       const runInputs = parseWorkflowRunInputs(request.runInputs ?? {});
-      return preflightWorkflow(
+      const generic = await preflightWorkflow(
         workflow,
         new NodeWorkflowPreflight({ baseDirectory }),
         { hostEnvironment: process.env, runInputs },
       );
+      const worktrees = await preflightAgentWorktrees(workflow, {
+        runId: requestedRunId(request.runId),
+        storageRoot: join(app.getPath('userData'), 'worktrees'),
+        baseDirectory,
+      });
+      const issues = [...generic.issues, ...worktrees.issues];
+      return {
+        ready: !issues.some((issue) => issue.severity === 'blocker'),
+        issues,
+        blocks: applyAgentWorktreePreviews(
+          generic.blocks,
+          workflow,
+          worktrees.scopes,
+        ),
+      };
     },
   );
 
-  ipcMain.handle(IPC_CHANNELS.runWorkflow, (event, input: unknown) => {
+  ipcMain.handle(IPC_CHANNELS.runWorkflow, async (event, input: unknown) => {
     const request = input as Partial<RunWorkflowRequest>;
     const baseDirectory = resolveDesktopWorkflowBaseDirectory(
       request.workflowFilePath,
       app.getPath('home'),
     );
-    const workflow = applyDefaultWorkingDirectory(
+    const configuredWorkflow = applyDefaultWorkingDirectory(
       parseRunnableWorkflow(request.workflow),
       baseDirectory,
     );
     const runInputs = parseWorkflowRunInputs(request.runInputs ?? {});
+    const runId = requestedRunId(request.runId);
+    const worktreeRuntime = new WorktreeRuntime();
+    let prepared: Awaited<ReturnType<typeof prepareAgentWorktrees>>;
+    try {
+      prepared = await prepareAgentWorktrees(configuredWorkflow, {
+        runId,
+        storageRoot: join(app.getPath('userData'), 'worktrees'),
+        baseDirectory,
+        runtime: worktreeRuntime,
+      });
+    } catch (error) {
+      if (error instanceof WorktreeRuntimeError) {
+        throw new Error(`${error.message} ${error.nextAction}`);
+      }
+      throw error;
+    }
     const run = startWorkflowRun(
-      workflow,
+      prepared.workflow,
       (runEvent) => {
         if (!event.sender.isDestroyed()) {
           event.sender.send(IPC_CHANNELS.runEvent, runEvent);
         }
       },
       {
+        runId,
         baseDirectory,
         runInputs,
-        onCompleted: (record) => runHistory.append(record),
+        onCompleted: async (record) => {
+          const worktrees = await finalizeAgentWorktrees(
+            prepared.scopes,
+            record,
+            worktreeRuntime,
+          );
+          await runHistory.append({ ...record, worktrees });
+        },
       },
     );
     activeRuns.track(run);
@@ -214,6 +300,54 @@ function registerIpc(runHistory: RunHistoryStore): void {
   ipcMain.handle(IPC_CHANNELS.cancelRun, (_event, runId: string) => {
     activeRuns.cancel(runId);
   });
+}
+
+async function findRetainedWorktree(
+  runHistory: RunHistoryStore,
+  runId: string,
+  scopeId: string,
+): Promise<{
+  readonly record: RunHistoryRecord;
+  readonly worktree: WorktreeRunRecord;
+}> {
+  const record = (await runHistory.list()).find(
+    (candidate) => candidate.runId === runId,
+  );
+  const worktree = record?.worktrees?.find(
+    (candidate) => candidate.scopeId === scopeId,
+  );
+  if (record === undefined || worktree === undefined) {
+    throw new Error(`Run ${runId} has no retained worktree scope ${scopeId}.`);
+  }
+  if (worktree.state !== 'retained') {
+    throw new Error(`Worktree scope ${scopeId} has already been cleaned.`);
+  }
+  return { record, worktree };
+}
+
+function worktreeScopeFromRecord(
+  runId: string,
+  record: WorktreeRunRecord,
+): WorktreeScope {
+  return {
+    repositoryRoot: record.repositoryRoot,
+    requestedBaseRef: record.baseCommit,
+    baseCommit: record.baseCommit,
+    sourceStatus: '',
+    sourceIsDirty: record.sourceIsDirty,
+    runId,
+    scopeId: record.scopeId,
+    branchName: record.branchName,
+    worktreePath: record.worktreePath,
+    participants: [],
+    createdAt: record.createdAt,
+  };
+}
+
+function requestedRunId(value: unknown): string {
+  return typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value)
+    ? value
+    : crypto.randomUUID();
 }
 
 function safeFileName(name: string): string {

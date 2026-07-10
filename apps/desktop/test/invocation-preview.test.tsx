@@ -72,4 +72,32 @@ describe('exact invocation preview', () => {
     expect(preview.outputs[0]?.resolvedPath).toBe('/workspace/output.txt');
     expect(preview.shellSyntax).toContain('redirect');
   });
+
+  it('shows literal template values and explicit routed-input boundaries', () => {
+    const base = createProcessBlock('template-preview');
+    const preview = buildInvocationPreview({
+      ...base,
+      invocation: {
+        ...base.invocation,
+        arguments: [
+          {
+            type: 'template',
+            template: '{{instruction}}\nContext:\n{{context}}',
+            inputs: {
+              instruction: { value: 'Review exactly.' },
+              context: { portId: 'context' },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(preview.arguments).toEqual([
+      {
+        position: 1,
+        source: 'template',
+        value: 'Review exactly.\nContext:\n⟨input:context⟩',
+      },
+    ]);
+  });
 });

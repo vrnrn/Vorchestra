@@ -1,6 +1,6 @@
 # Vorchestra desktop
 
-Electron host and React canvas for the v0.2 local workflow experience.
+Electron host and React canvas for the v0.3 local workflow experience.
 
 ## Boundaries
 
@@ -12,6 +12,10 @@ Electron host and React canvas for the v0.2 local workflow experience.
 - `src/main` owns native file dialogs and local execution authority. It
   delegates DAG scheduling and artifact routing to `executeWorkflow` and
   delegates child process behavior to `@vorchestra/node-runner`.
+- `src/shared/agent-runtime.ts` owns the capability registry and compiles Codex,
+  Cline, and Antigravity editor settings to generic process definitions.
+  `src/main/worktree-runtime.ts` owns explicit run-scoped Git worktrees; neither
+  boundary adds Agent, model-provider, or Git scheduling concepts to the engine.
 - Saved files contain only the versioned workflow definition. Canvas positions
   live in `workflow.layout`; retained run snapshots are sensitive local
   application data and never enter portable workflow files.

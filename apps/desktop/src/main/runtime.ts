@@ -16,7 +16,10 @@ import {
 } from '@vorchestra/node-runner';
 import type { BlockRunSnapshot, DesktopRunEvent } from '../shared/contracts.js';
 import type { RunHistoryRecord } from '../shared/contracts.js';
-import { getAgentBlockPresentation } from '../shared/agent-runtime.js';
+import {
+  getAgentBlockPresentation,
+  type AgentRuntimeId,
+} from '../shared/agent-runtime.js';
 
 type EventSink = (event: DesktopRunEvent) => void;
 
@@ -27,6 +30,7 @@ export interface ActiveRun {
 }
 
 export interface StartWorkflowRunOptions {
+  readonly runId?: string;
   readonly baseDirectory?: string;
   readonly runInputs?: WorkflowRunInputs;
   /** Process authority injection used by tests and alternate desktop hosts. */
@@ -78,7 +82,7 @@ export function startWorkflowRun(
   onEvent: EventSink,
   options: StartWorkflowRunOptions = {},
 ): ActiveRun {
-  const runId = crypto.randomUUID();
+  const runId = options.runId ?? crypto.randomUUID();
   const controller = new AbortController();
   const snapshots = new Map<string, BlockRunSnapshot>(
     workflow.blocks.map((block) => [block.id, emptySnapshot(block.id)]),
@@ -182,9 +186,10 @@ export function createDesktopProcessRunner(
   return {
     async run(request, options): Promise<ProcessRunResult> {
       const result = await delegate.run(request, options);
-      return agentRuntimes.get(request.blockId) === 'codex'
-        ? translateCodexResult(result)
-        : result;
+      const runtime = agentRuntimes.get(request.blockId);
+      return runtime === undefined
+        ? result
+        : translateAgentRuntimeResult(runtime, result);
     },
   };
 }
@@ -206,33 +211,62 @@ export function materializeEffectiveRunInputs(
   return values;
 }
 
-function translateCodexResult(result: ProcessRunResult): ProcessRunResult {
+function translateAgentRuntimeResult(
+  runtime: AgentRuntimeId,
+  result: ProcessRunResult,
+): ProcessRunResult {
   if (
     result.status !== 'failed' ||
     result.failure.code !== 'process_exit_nonzero' ||
-    !looksLikeCodexAuthenticationFailure(
+    !looksLikeAuthenticationFailure(
       `${result.stderr}\n${result.stdout}\n${result.failure.message}`,
     )
   ) {
     return result;
   }
 
+  const guidance = runtimeAuthenticationGuidance(runtime);
   return {
     ...result,
     failure: {
       code: 'process_authentication_failed',
-      message: 'Codex CLI could not authenticate with its local configuration.',
-      nextAction:
-        'Run `codex login` in a terminal, confirm `codex exec` works locally, then retry this workflow.',
+      message: `${guidance.label} could not authenticate with its local configuration.`,
+      nextAction: guidance.nextAction,
       ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
     },
   };
 }
 
-function looksLikeCodexAuthenticationFailure(diagnostics: string): boolean {
-  return /(?:not (?:logged in|authenticated)|authentication (?:required|failed)|unauthorized|invalid api key|codex login|\b401\b)/i.test(
+function looksLikeAuthenticationFailure(diagnostics: string): boolean {
+  return /(?:not (?:logged in|authenticated|signed in)|authentication (?:required|failed)|sign[ -]?in required|unauthorized|invalid api key|login required|codex login|cline auth|\b401\b)/i.test(
     diagnostics,
   );
+}
+
+function runtimeAuthenticationGuidance(runtime: AgentRuntimeId): {
+  readonly label: string;
+  readonly nextAction: string;
+} {
+  switch (runtime) {
+    case 'codex':
+      return {
+        label: 'Codex CLI',
+        nextAction:
+          'Run `codex login` in a terminal, confirm `codex exec` works locally, then retry this workflow.',
+      };
+    case 'cline':
+      return {
+        label: 'Cline CLI',
+        nextAction:
+          'Run `cline auth` in a terminal, confirm a one-shot Cline prompt works locally, then retry this workflow.',
+      };
+    case 'antigravity':
+      return {
+        label: 'Antigravity CLI',
+        nextAction:
+          'Run `agy` in a terminal and complete its local sign-in flow, confirm `agy --print` works, then retry this workflow.',
+      };
+  }
 }
 
 function forwardEvent(

@@ -357,7 +357,6 @@ describe('desktop runtime projection', () => {
       'read-only',
       '--color',
       'never',
-      '--skip-git-repo-check',
       'Answer exactly once.',
     ]);
     expect(retained?.blocks[0]).toMatchObject({
@@ -578,54 +577,61 @@ describe('desktop runtime projection', () => {
     });
   });
 
-  it('translates Codex authentication diagnostics without provider behavior in the engine', async () => {
-    const workflow = setAgentBlockPresentation(
-      {
-        ...createWorkflow(),
-        blocks: [createProcessBlock('agent')],
-      },
-      'agent',
-      'codex',
-    );
-    const delegate: ProcessRunner = {
-      async run() {
-        return {
-          status: 'failed',
-          exitCode: 1,
-          stdout: '',
-          stderr: 'Not logged in. Run codex login.',
-          artifacts: [],
-          failure: {
-            code: 'process_exit_nonzero',
-            message: 'Process exited with code 1.',
+  it.each([
+    ['codex', 'Not logged in. Run codex login.', 'codex login'],
+    ['cline', 'Authentication required. Run cline auth.', 'cline auth'],
+    ['antigravity', 'Sign-in required for this session.', 'agy --print'],
+  ] as const)(
+    'translates %s authentication diagnostics without provider behavior in the engine',
+    async (runtime, diagnostics, expectedGuidance) => {
+      const workflow = setAgentBlockPresentation(
+        {
+          ...createWorkflow(),
+          blocks: [createProcessBlock('agent')],
+        },
+        'agent',
+        runtime,
+      );
+      const delegate: ProcessRunner = {
+        async run() {
+          return {
+            status: 'failed',
             exitCode: 1,
-          },
-        };
-      },
-    };
+            stdout: '',
+            stderr: diagnostics,
+            artifacts: [],
+            failure: {
+              code: 'process_exit_nonzero',
+              message: 'Process exited with code 1.',
+              exitCode: 1,
+            },
+          };
+        },
+      };
 
-    const result = await createDesktopProcessRunner(workflow, delegate).run(
-      {
-        runId: 'run-auth',
-        blockId: 'agent',
-        executable: 'not-used-for-identification',
-        arguments: [],
-        shell: false,
-        environment: {},
-        outputs: [],
-      },
-      { signal: new AbortController().signal },
-    );
+      const result = await createDesktopProcessRunner(workflow, delegate).run(
+        {
+          runId: 'run-auth',
+          blockId: 'agent',
+          executable: 'not-used-for-identification',
+          arguments: [],
+          shell: false,
+          environment: {},
+          outputs: [],
+        },
+        { signal: new AbortController().signal },
+      );
 
-    expect(result.status).toBe('failed');
-    if (result.status === 'failed') {
-      expect(result.failure).toMatchObject({
-        code: 'process_authentication_failed',
-        exitCode: 1,
-      });
-      expect(result.failure.nextAction).toContain('codex login');
-    }
-  });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.failure).toMatchObject({
+          code: 'process_authentication_failed',
+          exitCode: 1,
+        });
+        expect(result.failure.nextAction).toContain(expectedGuidance);
+      }
+    },
+  );
 });
 
 describe('active run registry', () => {

@@ -3,12 +3,12 @@
 Vorchestra is a local-first desktop application for composing trusted
 command-line tools into visual workflows.
 
-The v0.2 implementation and release acceptance are complete. macOS artifacts are
-intentionally unsigned and unnotarized, and the packaged release supports Apple
-silicon only. The product direction and release boundaries live in
-[VISION.md](./VISION.md). Targets and current evidence are recorded in
-[docs/roadmap/V0_2_TARGETS.md](./docs/roadmap/V0_2_TARGETS.md) and
-[docs/acceptance/V0_2.md](./docs/acceptance/V0_2.md).
+v0.3 adds capability-aware Codex, Cline, and Antigravity Agent runtimes,
+deterministic instruction templates, and explicit workflow-run Git worktrees.
+The accepted v0.2 macOS release remains intentionally unsigned and unnotarized,
+with Apple silicon as its packaged target. The product direction and release
+boundaries live in [VISION.md](./VISION.md); the current release scope is
+recorded in [docs/roadmap/V0_3_TARGETS.md](./docs/roadmap/V0_3_TARGETS.md).
 
 ## Repository layout
 
@@ -85,17 +85,27 @@ npm run dev
   directory, and routes that filesystem reference to `wc`. Running it consumes
   Codex account usage and should be done only in a disposable directory with
   [`codex-file-agent.example.json`](./examples/inputs/codex-file-agent.example.json).
+- [`multi-runtime-worktree.vorchestra.json`](./examples/workflows/multi-runtime-worktree.vorchestra.json)
+  composes Codex, Cline, and Antigravity in one ordered DAG. The agents share an
+  explicit run-scoped worktree, exchange visible text handoffs, and expose only
+  declared generated files. Running it consumes each runtime's account usage and
+  should be done only after reviewing the three local CLI configurations.
 
 ## Current boundaries
 
-- Workflows remain directed acyclic graphs in v0.2.
+- Workflows remain directed acyclic graphs in v0.3.
 - Artifacts and runtime events are separate models.
 - Direct executable invocation is the default; shell execution is explicit.
 - The engine does not import UI or provider-specific code.
 - Workflow files contain declared environment references, not resolved host
   secret values.
 - Local processes run with the current user's ambient operating-system
-  permissions; v0.2 is not a general process sandbox.
+  permissions; v0.3 is not a general process sandbox.
+- Codex, Cline, and Antigravity remain desktop-owned runtime compilers. The
+  engine receives only generic process, artifact, template, and runtime-event
+  contracts.
+- Worktree isolation is explicit. Vorchestra does not automatically commit,
+  merge, push, open pull requests, or discard changed worktrees.
 - Apple silicon macOS is the accepted v0.2 desktop target. Intel macOS, Windows,
   and Linux releases remain future work.
 - v0.2 macOS artifacts are not signed or notarized. Installation requires the

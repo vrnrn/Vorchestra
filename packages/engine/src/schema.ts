@@ -21,6 +21,24 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 const identifierSchema = z.string().trim().min(1);
 
+export const processTemplateInputSchema = z.union([
+  z
+    .object({
+      portId: identifierSchema,
+    })
+    .strict(),
+  z
+    .object({
+      value: z.string(),
+    })
+    .strict(),
+]);
+
+const templateInputsSchema = objectRecordSchema(
+  z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]*$/),
+  processTemplateInputSchema,
+);
+
 const reservedEnvironmentVariableNames = new Set([
   ...Object.getOwnPropertyNames(Object.prototype),
   'prototype',
@@ -68,9 +86,18 @@ const inputArgumentSchema = z
   })
   .strict();
 
+const templateArgumentSchema = z
+  .object({
+    type: z.literal('template'),
+    template: z.string(),
+    inputs: templateInputsSchema,
+  })
+  .strict();
+
 export const argumentSchema = z.discriminatedUnion('type', [
   literalArgumentSchema,
   inputArgumentSchema,
+  templateArgumentSchema,
 ]);
 
 const literalEnvironmentValueSchema = z
@@ -106,6 +133,24 @@ const environmentRecordSchema = objectRecordSchema(
   environmentVariableNameSchema,
   environmentValueSchema,
 ) as z.ZodType<Record<string, EnvironmentValue>>;
+
+const stdinPortBindingSchema = z
+  .object({
+    portId: identifierSchema,
+  })
+  .strict();
+
+const stdinTemplateBindingSchema = z
+  .object({
+    template: z.string(),
+    inputs: templateInputsSchema,
+  })
+  .strict();
+
+export const processStdinSchema = z.union([
+  stdinPortBindingSchema,
+  stdinTemplateBindingSchema,
+]);
 
 const stdoutOutputBindingSchema = z
   .object({
@@ -202,12 +247,7 @@ export const processInvocationSchema = z
       .transform(
         (environment) => environment ?? nullPrototypeRecord<EnvironmentValue>(),
       ),
-    stdin: z
-      .object({
-        portId: identifierSchema,
-      })
-      .strict()
-      .optional(),
+    stdin: processStdinSchema.optional(),
     shell: z.boolean().default(false),
     outputs: z.array(outputBindingSchema).default([]),
   })
@@ -301,6 +341,10 @@ const serializedWorkflowDefinitionSchema = z.discriminatedUnion(
 export type ArtifactKind = z.infer<typeof artifactKindSchema>;
 export type InputPort = z.infer<typeof inputPortSchema>;
 export type OutputPort = z.infer<typeof outputPortSchema>;
+export type ProcessArgument = z.infer<typeof argumentSchema>;
+export type ProcessTemplateInput = z.infer<typeof processTemplateInputSchema>;
+export type ProcessStdin = z.infer<typeof processStdinSchema>;
+export type ProcessInvocation = z.infer<typeof processInvocationSchema>;
 export type ProcessBlock = z.infer<typeof processBlockSchema>;
 export type Connection = z.infer<typeof connectionSchema>;
 export type WorkflowRunInputValue = z.infer<typeof workflowRunInputValueSchema>;

@@ -1,17 +1,35 @@
 import type { RunHistoryRecord } from '../../shared/contracts';
-import { Clock3, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import {
+  Clock3,
+  FileDiff,
+  FolderOpen,
+  GitBranch,
+  Sparkles,
+  Trash2,
+} from 'lucide-react';
 
 export function RunHistoryPanel({
   records,
   selectedRunId,
   onSelect,
   onClear,
+  onReveal,
+  onWorktreeChanged,
 }: {
   records: readonly RunHistoryRecord[];
   selectedRunId?: string;
   onSelect: (record: RunHistoryRecord) => void;
   onClear: () => void;
+  onReveal?: (path: string) => void;
+  onWorktreeChanged?: () => void;
 }) {
+  const selected = records.find((record) => record.runId === selectedRunId);
+  const [inspection, setInspection] = useState<{
+    readonly scopeId: string;
+    readonly text: string;
+  }>();
+  const [worktreeError, setWorktreeError] = useState<string>();
   return (
     <section className="run-history-panel" aria-label="Local run history">
       <header>
@@ -30,7 +48,8 @@ export function RunHistoryPanel({
       </header>
       <p>
         Retained locally for up to 30 days within the 100 MiB application limit.
-        Output and paths may be sensitive.
+        Output and paths may be sensitive. Records that own retained worktrees
+        remain until those scopes are safely cleaned.
       </p>
       <div className="run-history-list">
         {records.map((record) => (
@@ -55,6 +74,97 @@ export function RunHistoryPanel({
           <div className="empty-line">No retained runs for this workflow</div>
         )}
       </div>
+      {(selected?.worktrees?.length ?? 0) > 0 && (
+        <div className="run-history-worktrees">
+          <small>WORKTREE SCOPES</small>
+          {selected!.worktrees!.map((worktree) => (
+            <article key={worktree.scopeId}>
+              <GitBranch size={13} />
+              <span>
+                <strong>
+                  {worktree.scopeId} · {worktree.state}
+                </strong>
+                <small>{worktree.worktreePath}</small>
+                <small>
+                  {worktree.branchName} · base{' '}
+                  {worktree.baseCommit.slice(0, 12)}
+                </small>
+                <small>
+                  Source {worktree.sourceIsDirty ? 'was dirty' : 'was clean'} ·{' '}
+                  {worktree.hasChangesFromBase
+                    ? 'scope changed'
+                    : 'scope unchanged'}
+                </small>
+                {worktree.status !== '' && <small>{worktree.status}</small>}
+                <small>{worktree.nextAction}</small>
+              </span>
+              {worktree.state === 'retained' && onReveal !== undefined && (
+                <span className="worktree-actions">
+                  <button
+                    className="icon-button"
+                    aria-label={`Inspect retained worktree ${worktree.scopeId}`}
+                    onClick={() => {
+                      setWorktreeError(undefined);
+                      void window.vorchestra
+                        .inspectRunWorktree(selected!.runId, worktree.scopeId)
+                        .then((result) =>
+                          setInspection({
+                            scopeId: worktree.scopeId,
+                            text:
+                              result.diff ||
+                              result.status ||
+                              'Worktree is clean.',
+                          }),
+                        )
+                        .catch((error: unknown) =>
+                          setWorktreeError(
+                            error instanceof Error
+                              ? error.message
+                              : String(error),
+                          ),
+                        );
+                    }}
+                  >
+                    <FileDiff size={12} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label={`Reveal retained worktree ${worktree.scopeId}`}
+                    onClick={() => onReveal(worktree.worktreePath)}
+                  >
+                    <FolderOpen size={12} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label={`Safely clean worktree ${worktree.scopeId}`}
+                    onClick={() => {
+                      setWorktreeError(undefined);
+                      void window.vorchestra
+                        .cleanupRunWorktree(selected!.runId, worktree.scopeId)
+                        .then(() => onWorktreeChanged?.())
+                        .catch((error: unknown) =>
+                          setWorktreeError(
+                            error instanceof Error
+                              ? error.message
+                              : String(error),
+                          ),
+                        );
+                    }}
+                  >
+                    <Sparkles size={12} />
+                  </button>
+                </span>
+              )}
+              {inspection?.scopeId === worktree.scopeId && (
+                <pre>{inspection.text}</pre>
+              )}
+            </article>
+          ))}
+          {worktreeError !== undefined && (
+            <p className="worktree-error">{worktreeError}</p>
+          )}
+        </div>
+      )}
     </section>
   );
 }

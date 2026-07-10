@@ -691,6 +691,70 @@ test('requires every declared port to have an invocation binding', () => {
   );
 });
 
+test('counts argument and stdin template inputs as invocation bindings', () => {
+  const block = processBlock(
+    'template-bindings',
+    [inputPort('argument'), inputPort('stdin')],
+    [],
+  );
+  block.inputs[0]!.required = false;
+  block.inputs[1]!.required = false;
+  block.invocation.arguments = [
+    {
+      type: 'template',
+      template: 'prompt={{prompt}}',
+      inputs: { prompt: { portId: 'argument' } },
+    },
+  ];
+  block.invocation.stdin = {
+    template: '{{body}}',
+    inputs: { body: { portId: 'stdin' } },
+  };
+
+  assert.deepEqual(validateWorkflow(workflowWith([block])).issues, []);
+});
+
+test('does not count literal template values as block input bindings', () => {
+  const block = processBlock('literal-template', [inputPort('unbound')], []);
+  block.inputs[0]!.required = false;
+  block.invocation.arguments = [
+    {
+      type: 'template',
+      template: '{{instruction}}',
+      inputs: { instruction: { value: 'Exact static instruction' } },
+    },
+  ];
+
+  assert.ok(
+    validateWorkflow(workflowWith([block])).issues.some(
+      ({ code }) => code === 'input_port_unbound',
+    ),
+  );
+});
+
+test('rejects malformed, duplicate, missing, and unknown invocation template placeholders', () => {
+  const block = processBlock('invalid-template', [inputPort('known')], []);
+  block.inputs[0]!.required = false;
+  block.invocation.arguments = [
+    {
+      type: 'template',
+      template: '{{missing}} {{duplicate}} {{duplicate}} {{bad name}} }}',
+      inputs: {
+        duplicate: { portId: 'known' },
+        unused: { portId: 'missing-port' },
+      },
+    },
+  ];
+
+  const issues = validateWorkflow(workflowWith([block])).issues;
+  const codes = issues.map(({ code }) => code);
+  assert.ok(codes.includes('invocation_template_malformed_placeholder'));
+  assert.ok(codes.includes('invocation_template_duplicate_placeholder'));
+  assert.ok(codes.includes('invocation_template_missing_input'));
+  assert.ok(codes.includes('invocation_template_unknown_input'));
+  assert.ok(codes.includes('binding_references_missing_port'));
+});
+
 test('rejects multiple output bindings for the same port', () => {
   const block = processBlock('duplicate-binding', [], [outputPort('result')]);
   block.invocation.outputs = [

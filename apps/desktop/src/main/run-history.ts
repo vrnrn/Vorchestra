@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { parseWorkflowRunInputs } from '@vorchestra/engine';
 import type { RunHistoryRecord } from '../shared/contracts.js';
+import type { WorktreeRunRecord } from '../shared/contracts.js';
 
 export const DEFAULT_RUN_HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const DEFAULT_RUN_HISTORY_MAX_BYTES = 100 * 1024 * 1024;
@@ -64,15 +65,55 @@ export class RunHistoryStore {
 
   async clear(workflowId?: string): Promise<void> {
     await this.#enqueue(async () => {
+      const existing = await this.#readRecords();
+      const retained = existing.filter(
+        (record) =>
+          (workflowId === undefined || record.workflowId === workflowId) &&
+          hasRetainedWorktree(record),
+      );
+      if (retained.length > 0) {
+        throw new Error(
+          'Run history with retained worktrees cannot be cleared. Inspect and safely clean each retained scope first.',
+        );
+      }
       if (workflowId === undefined) {
         await this.#writeRecords([]);
         return;
       }
-      const records = (await this.#readRecords()).filter(
+      const records = existing.filter(
         (record) => record.workflowId !== workflowId,
       );
       await this.#writeRecords(records);
     });
+  }
+
+  async updateWorktree(
+    runId: string,
+    scopeId: string,
+    update: (current: WorktreeRunRecord) => WorktreeRunRecord,
+  ): Promise<WorktreeRunRecord> {
+    let updated: WorktreeRunRecord | undefined;
+    await this.#enqueue(async () => {
+      const records = await this.#readRecords();
+      const next = records.map((record) => {
+        if (record.runId !== runId || record.worktrees === undefined) {
+          return record;
+        }
+        return {
+          ...record,
+          worktrees: record.worktrees.map((worktree) => {
+            if (worktree.scopeId !== scopeId) return worktree;
+            updated = update(worktree);
+            return updated;
+          }),
+        };
+      });
+      if (updated === undefined) {
+        throw new Error(`Run ${runId} has no worktree scope ${scopeId}.`);
+      }
+      await this.#writeRecords(next);
+    });
+    return updated!;
   }
 
   async #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -97,7 +138,11 @@ export class RunHistoryStore {
   #pruneByAge(records: readonly RunHistoryRecord[]): RunHistoryRecord[] {
     const cutoff = this.#now().getTime() - this.#retentionMs;
     return records
-      .filter((record) => Date.parse(record.completedAt) >= cutoff)
+      .filter(
+        (record) =>
+          hasRetainedWorktree(record) ||
+          Date.parse(record.completedAt) >= cutoff,
+      )
       .sort(compareNewestFirst);
   }
 
@@ -107,7 +152,15 @@ export class RunHistoryStore {
       retained.length > 0 &&
       serializedByteLength(retained) > this.#maxBytes
     ) {
-      retained.pop();
+      let removableIndex = -1;
+      for (let index = retained.length - 1; index >= 0; index -= 1) {
+        if (!hasRetainedWorktree(retained[index]!)) {
+          removableIndex = index;
+          break;
+        }
+      }
+      if (removableIndex < 0) break;
+      retained.splice(removableIndex, 1);
     }
     return retained;
   }
@@ -121,6 +174,12 @@ export class RunHistoryStore {
     });
     await rename(temporaryPath, this.#filePath);
   }
+}
+
+function hasRetainedWorktree(record: RunHistoryRecord): boolean {
+  return (
+    record.worktrees?.some((worktree) => worktree.state === 'retained') ?? false
+  );
 }
 
 function compareNewestFirst(
@@ -170,7 +229,32 @@ function isRunHistoryRecord(value: unknown): value is RunHistoryRecord {
   } catch {
     return false;
   }
-  return record.blocks.every(isBlockRunSnapshot);
+  return (
+    record.blocks.every(isBlockRunSnapshot) &&
+    (record.worktrees === undefined ||
+      (Array.isArray(record.worktrees) &&
+        record.worktrees.every(isWorktreeRunRecord)))
+  );
+}
+
+function isWorktreeRunRecord(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  return (
+    typeof value.scopeId === 'string' &&
+    typeof value.repositoryRoot === 'string' &&
+    typeof value.baseCommit === 'string' &&
+    typeof value.branchName === 'string' &&
+    typeof value.worktreePath === 'string' &&
+    typeof value.createdAt === 'string' &&
+    Number.isFinite(Date.parse(value.createdAt)) &&
+    typeof value.sourceIsDirty === 'boolean' &&
+    (value.state === 'retained' || value.state === 'cleaned') &&
+    typeof value.reason === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.headCommit === 'string' &&
+    typeof value.hasChangesFromBase === 'boolean' &&
+    typeof value.nextAction === 'string'
+  );
 }
 
 function isBlockRunSnapshot(value: unknown): boolean {

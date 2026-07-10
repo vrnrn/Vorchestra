@@ -5,8 +5,10 @@ import {
   type ProcessBlock,
 } from '@vorchestra/engine';
 import {
+  AGENT_RUNTIME_REGISTRY,
   agentEditorConfigFromBlock,
   compileAgentBlock,
+  getAgentRuntimeDescriptor,
   getAgentBlockPresentation,
   removeBlockPresentation,
   setAgentBlockPresentation,
@@ -103,7 +105,6 @@ describe('Codex Agent runtime compiler', () => {
       'read-only',
       '--color',
       'never',
-      '--skip-git-repo-check',
       instruction,
     ]);
     expect(argumentValues(block).at(-1)).toBe(instruction);
@@ -146,7 +147,6 @@ describe('Codex Agent runtime compiler', () => {
       'workspace-write',
       '--color',
       'never',
-      '--skip-git-repo-check',
       'Create the declared output file.',
     ]);
     expect(block.invocation.outputs).toContainEqual({
@@ -229,12 +229,214 @@ describe('Codex Agent runtime compiler', () => {
   });
 });
 
+describe('capability-aware Agent runtime registry', () => {
+  it('declares stable Codex, Cline, and Antigravity identities', () => {
+    expect(AGENT_RUNTIME_REGISTRY.map((runtime) => runtime.id)).toEqual([
+      'codex',
+      'cline',
+      'antigravity',
+    ]);
+    expect(getAgentRuntimeDescriptor('antigravity')).toMatchObject({
+      executable: 'agy',
+      modelOverride: true,
+      instructionDeliveryModes: ['argument', 'template'],
+      capabilities: {
+        modelOverride: true,
+        instructionDeliveryModes: ['argument', 'template'],
+      },
+    });
+  });
+
+  it('compiles a Cline one-shot with exact model, prompt, and read-only intent', () => {
+    const instruction = 'Inspect this repository exactly once.  ';
+    const block = compileAgentBlock({
+      ...baseConfig('cline', instruction),
+      model: 'openai/gpt-5.3-codex',
+      textContext: { portId: 'context', name: 'Review context' },
+      workingDirectory: '/workspace/project',
+      authority: 'read-only',
+    });
+
+    expect(block.invocation.executable).toBe('cline');
+    expect(argumentValues(block)).toEqual([
+      '--plan',
+      '--model',
+      'openai/gpt-5.3-codex',
+      instruction,
+    ]);
+    expect(block.invocation.stdin).toEqual({ portId: 'context' });
+    expect(block.invocation.shell).toBe(false);
+    expectForbiddenBypasses(block);
+    expect(
+      agentEditorConfigFromBlock(block, {
+        kind: 'ai-agent',
+        agentRuntime: 'cline',
+      }),
+    ).toMatchObject({
+      agentRuntime: 'cline',
+      instruction,
+      model: 'openai/gpt-5.3-codex',
+      authority: 'read-only',
+    });
+    expectValidStandaloneBlock(block);
+  });
+
+  it('compiles Antigravity print mode without permission bypasses', () => {
+    const instruction = 'Return a concise architecture note.';
+    const block = compileAgentBlock({
+      ...baseConfig('antigravity', instruction),
+      model: 'gemini-2.5-pro',
+      authority: 'workspace-write',
+    });
+
+    expect(block.invocation.executable).toBe('agy');
+    expect(argumentValues(block)).toEqual([
+      '--model',
+      'gemini-2.5-pro',
+      '--print',
+      instruction,
+    ]);
+    expect(block.invocation.stdin).toBeUndefined();
+    expectForbiddenBypasses(block);
+    expect(
+      agentEditorConfigFromBlock(block, {
+        kind: 'ai-agent',
+        agentRuntime: 'antigravity',
+      }),
+    ).toMatchObject({
+      agentRuntime: 'antigravity',
+      instruction,
+      model: 'gemini-2.5-pro',
+      authority: 'workspace-write',
+    });
+    expectValidStandaloneBlock(block);
+  });
+
+  it('composes exact instruction and connected context through a visible generic argument template', () => {
+    const config: AgentBlockEditorConfig = {
+      ...baseConfig('antigravity', 'Review the supplied result exactly.'),
+      instructionDelivery: 'template',
+      instructionTemplate:
+        '{{instruction}}\n\nPrior agent result:\n{{context}}',
+      textContext: { portId: 'context', name: 'Prior result' },
+      authority: 'read-only',
+    };
+
+    const block = compileAgentBlock(config);
+    expect(block.invocation.stdin).toBeUndefined();
+    expect(block.invocation.arguments.at(-1)).toEqual({
+      type: 'template',
+      template: '{{instruction}}\n\nPrior agent result:\n{{context}}',
+      inputs: {
+        instruction: { value: 'Review the supplied result exactly.' },
+        context: { portId: 'context' },
+      },
+    });
+    expect(
+      agentEditorConfigFromBlock(block, {
+        kind: 'ai-agent',
+        agentRuntime: 'antigravity',
+      }),
+    ).toEqual(config);
+    expectValidStandaloneBlock(block);
+  });
+
+  it('rejects instruction and context modes the runtime cannot represent', () => {
+    expect(() =>
+      compileAgentBlock({
+        ...baseConfig('codex', 'Read this file.'),
+        instructionDelivery: 'file',
+      }),
+    ).toThrow('Codex does not support file instruction delivery');
+
+    expect(() =>
+      compileAgentBlock({
+        ...baseConfig('antigravity', 'Use this context.'),
+        textContext: { portId: 'context', name: 'Context' },
+      }),
+    ).toThrow('cannot receive separate connected text context');
+  });
+
+  it('round-trips runtime and explicit worktree isolation metadata', () => {
+    const workflow = setAgentBlockPresentation(
+      createWorkflow(),
+      'agent-isolated',
+      'cline',
+      {
+        mode: 'workflow-run-worktree',
+        repositoryRoot: '/workspace/project',
+        baseRef: 'main',
+        scope: 'shared-review',
+      },
+    );
+
+    expect(getAgentBlockPresentation(workflow, 'agent-isolated')).toEqual({
+      kind: 'ai-agent',
+      agentRuntime: 'cline',
+      isolation: {
+        mode: 'workflow-run-worktree',
+        repositoryRoot: '/workspace/project',
+        baseRef: 'main',
+        scope: 'shared-review',
+      },
+    });
+  });
+
+  it('preserves unsupported metadata until explicitly removed', () => {
+    const workflow = {
+      ...createWorkflow(),
+      editor: {
+        'vorchestra.desktop': {
+          schemaVersion: 1,
+          blockPresentations: {
+            welcome: { kind: 'ai-agent', agentRuntime: 'future-agent' },
+            untouched: { kind: 'future-presentation', value: 1 },
+          },
+        },
+      },
+    };
+
+    expect(JSON.stringify(workflow.editor)).toContain('future-agent');
+    const recovered = removeBlockPresentation(workflow, 'welcome');
+    expect(JSON.stringify(recovered.editor)).not.toContain('future-agent');
+    expect(JSON.stringify(recovered.editor)).toContain('future-presentation');
+  });
+});
+
+function baseConfig(
+  agentRuntime: AgentBlockEditorConfig['agentRuntime'],
+  instruction: string,
+): AgentBlockEditorConfig {
+  return {
+    id: `${agentRuntime}-agent`,
+    name: `${agentRuntime} agent`,
+    agentRuntime,
+    instruction,
+    authority: 'workspace-write',
+    textResponse: { portId: 'response', name: 'Response' },
+    filesystemOutputs: [],
+  };
+}
+
+function expectForbiddenBypasses(block: ProcessBlock): void {
+  const arguments_ = argumentValues(block);
+  expect(arguments_).not.toContain('--yolo');
+  expect(arguments_).not.toContain('--auto-approve');
+  expect(arguments_).not.toContain('--dangerously-skip-permissions');
+  expect(arguments_).not.toContain('--skip-git-repo-check');
+  expect(arguments_).not.toContain(
+    '--dangerously-bypass-approvals-and-sandbox',
+  );
+}
+
 function argumentValues(block: ProcessBlock): string[] {
   return block.invocation.arguments.map((argument) => {
     expect(argument.type).toBe('literal');
     return argument.type === 'literal'
       ? argument.value
-      : `input:${argument.portId}`;
+      : argument.type === 'input'
+        ? `input:${argument.portId}`
+        : `template:${argument.template}`;
   });
 }
 
