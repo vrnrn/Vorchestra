@@ -6,12 +6,54 @@ import {
   addInputPort,
   addOutputPort,
   connectBlocks,
+  reconcileProcessNodes,
   removeBlock,
   removeInputPort,
   removeOutputPort,
+  setBlockPosition,
 } from '../src/renderer/src/workflow';
 
 describe('desktop workflow editing', () => {
+  it('keeps transient drag position while workflow data and status update', () => {
+    const workflow = createWorkflow();
+    const initial = reconcileProcessNodes(workflow, [], () => 'idle');
+    const dragging = initial.map((node) => ({
+      ...node,
+      position: { x: 740, y: 510 },
+      dragging: true,
+    }));
+    const renamed: WorkflowDefinition = {
+      ...workflow,
+      blocks: workflow.blocks.map((block) => ({
+        ...block,
+        name: 'Renamed while dragging',
+      })),
+    };
+
+    const reconciled = reconcileProcessNodes(
+      renamed,
+      dragging,
+      () => 'running',
+    );
+
+    expect(reconciled[0]).toMatchObject({
+      position: { x: 740, y: 510 },
+      dragging: true,
+      data: {
+        status: 'running',
+        block: { name: 'Renamed while dragging' },
+      },
+    });
+  });
+
+  it('persists a final drag position without disturbing other layout entries', () => {
+    const workflow = createWorkflow();
+    const next = setBlockPosition(workflow, 'welcome', { x: 920, y: 340 });
+
+    expect(next.layout?.blockPositions.welcome).toEqual({ x: 920, y: 340 });
+    expect(workflow.layout?.blockPositions.welcome).toEqual({ x: 180, y: 160 });
+  });
+
   it('creates a runnable starter workflow with explicit PATH authority', () => {
     const workflow = createWorkflow();
 

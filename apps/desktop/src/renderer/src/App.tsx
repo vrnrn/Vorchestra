@@ -11,10 +11,12 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  applyNodeChanges,
   type Connection as FlowConnection,
   type Edge,
   type EdgeChange,
   type NodeChange,
+  type OnNodeDrag,
 } from '@xyflow/react';
 import {
   validateWorkflow,
@@ -59,7 +61,9 @@ import {
   removeBlock,
   removeInputPort,
   removeOutputPort,
+  reconcileProcessNodes,
   replaceBlock,
+  setBlockPosition,
 } from './workflow';
 
 const nodeTypes = { process: ProcessNode };
@@ -67,6 +71,8 @@ type InspectorTab = 'configure' | 'run';
 
 export function App() {
   const [workflow, setWorkflow] = useState<WorkflowDefinition>(createWorkflow);
+  const [nodes, setNodes] = useState<ProcessFlowNode[]>([]);
+  const [canvasRevision, setCanvasRevision] = useState(0);
   const [filePath, setFilePath] = useState<string>();
   const [dirty, setDirty] = useState(false);
   const [selectedBlockId, setSelectedBlockId] = useState<string>('welcome');
@@ -96,6 +102,12 @@ export function App() {
     },
     [],
   );
+
+  const resetCanvasWorkflow = useCallback((next: WorkflowDefinition): void => {
+    setNodes(reconcileProcessNodes(next, [], () => 'idle'));
+    setWorkflow(next);
+    setCanvasRevision((revision) => revision + 1);
+  }, []);
 
   useEffect(() => {
     return window.vorchestra.onRunEvent((event: DesktopRunEvent) => {
@@ -141,22 +153,15 @@ export function App() {
     return () => window.removeEventListener('keydown', keyDown);
   });
 
-  const nodes = useMemo<ProcessFlowNode[]>(
-    () =>
-      workflow.blocks.map((block, index) => ({
-        id: block.id,
-        type: 'process',
-        position: workflow.layout?.blockPositions[block.id] ?? {
-          x: 160 + (index % 3) * 310,
-          y: 140 + Math.floor(index / 3) * 240,
-        },
-        data: {
-          block,
-          status: snapshots[block.id]?.state ?? 'idle',
-        },
-      })),
-    [snapshots, workflow],
-  );
+  useEffect(() => {
+    setNodes((current) =>
+      reconcileProcessNodes(
+        workflow,
+        current,
+        (blockId) => snapshots[blockId]?.state ?? 'idle',
+      ),
+    );
+  }, [snapshots, workflow]);
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -177,28 +182,37 @@ export function App() {
 
   const onNodesChange = useCallback(
     (changes: NodeChange<ProcessFlowNode>[]) => {
+      setNodes((current) => applyNodeChanges(changes, current));
+
+      const removedIds = new Set(
+        changes
+          .filter((change) => change.type === 'remove')
+          .map((change) => change.id),
+      );
+      if (removedIds.size > 0) {
+        changeWorkflow((current) =>
+          [...removedIds].reduce(removeBlock, current),
+        );
+        if (removedIds.has(selectedBlockId)) setSelectedBlockId('');
+      }
+
       for (const change of changes) {
-        if (change.type === 'remove') {
-          changeWorkflow((current) => removeBlock(current, change.id));
-          if (selectedBlockId === change.id) setSelectedBlockId('');
-        }
-        if (change.type === 'position' && change.position !== undefined) {
-          changeWorkflow((current) => ({
-            ...current,
-            layout: {
-              blockPositions: {
-                ...(current.layout?.blockPositions ?? {}),
-                [change.id]: change.position!,
-              },
-            },
-          }));
-        }
         if (change.type === 'select' && change.selected) {
           setSelectedBlockId(change.id);
+          break;
         }
       }
     },
     [changeWorkflow, selectedBlockId],
+  );
+
+  const onNodeDragStop = useCallback<OnNodeDrag<ProcessFlowNode>>(
+    (_event, node) => {
+      changeWorkflow((current) =>
+        setBlockPosition(current, node.id, node.position),
+      );
+    },
+    [changeWorkflow],
   );
 
   const onEdgesChange = useCallback(
@@ -289,7 +303,7 @@ export function App() {
     try {
       const result = await window.vorchestra.openWorkflow();
       if (result.canceled || result.workflow === undefined) return;
-      setWorkflow(result.workflow);
+      resetCanvasWorkflow(result.workflow);
       setFilePath(result.filePath);
       setDirty(false);
       setSnapshots({});
@@ -310,7 +324,7 @@ export function App() {
       return;
     }
     const next = createWorkflow();
-    setWorkflow(next);
+    resetCanvasWorkflow(next);
     setFilePath(undefined);
     setDirty(false);
     setSnapshots({});
@@ -477,10 +491,12 @@ export function App() {
             <span>{workflow.name}</span>
           </div>
           <ReactFlow
+            key={canvasRevision}
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
+            onNodeDragStop={onNodeDragStop}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onPaneClick={() => setSelectedBlockId('')}
@@ -502,7 +518,9 @@ export function App() {
               className="minimap"
               pannable
               zoomable
-              maskColor="rgba(8, 10, 14, .72)"
+              maskColor="rgba(8, 10, 14, .45)"
+              nodeStrokeColor="#929dab"
+              nodeStrokeWidth={1.5}
               nodeColor={(node) =>
                 statusColor(snapshots[node.id]?.state ?? 'idle')
               }

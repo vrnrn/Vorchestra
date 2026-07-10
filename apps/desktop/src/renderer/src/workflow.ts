@@ -1,9 +1,52 @@
 import type {
   ArtifactKind,
+  BlockExecutionState,
   Connection,
   ProcessBlock,
   WorkflowDefinition,
 } from '@vorchestra/engine';
+import type { ProcessFlowNode } from './ProcessNode';
+
+export function reconcileProcessNodes(
+  workflow: WorkflowDefinition,
+  currentNodes: readonly ProcessFlowNode[],
+  statusForBlock: (blockId: string) => BlockExecutionState | 'idle',
+): ProcessFlowNode[] {
+  const currentById = new Map(currentNodes.map((node) => [node.id, node]));
+
+  return workflow.blocks.map((block, index) => {
+    const current = currentById.get(block.id);
+    return {
+      ...current,
+      id: block.id,
+      type: 'process',
+      position:
+        current?.position ??
+        workflow.layout?.blockPositions[block.id] ??
+        defaultBlockPosition(index),
+      data: {
+        block,
+        status: statusForBlock(block.id),
+      },
+    };
+  });
+}
+
+export function setBlockPosition(
+  workflow: WorkflowDefinition,
+  blockId: string,
+  position: { readonly x: number; readonly y: number },
+): WorkflowDefinition {
+  return {
+    ...workflow,
+    layout: {
+      blockPositions: {
+        ...(workflow.layout?.blockPositions ?? {}),
+        [blockId]: position,
+      },
+    },
+  };
+}
 
 export function replaceBlock(
   workflow: WorkflowDefinition,
@@ -161,4 +204,11 @@ function uniquePortId(block: ProcessBlock, prefix: string): string {
   let index = 1;
   while (used.has(`${prefix}-${index}`)) index += 1;
   return `${prefix}-${index}`;
+}
+
+function defaultBlockPosition(index: number): { x: number; y: number } {
+  return {
+    x: 160 + (index % 3) * 310,
+    y: 140 + Math.floor(index / 3) * 240,
+  };
 }

@@ -74,6 +74,76 @@ await waitFor(
   'the desktop editor',
 );
 assert.equal(await evaluate('window.vorchestra !== undefined'), true);
+await waitFor(
+  `(() => {
+    const nodes = document.querySelectorAll('.react-flow__node').length;
+    const mapNodes = document.querySelectorAll('.react-flow__minimap-node').length;
+    return nodes > 0 && mapNodes === nodes;
+  })()`,
+  'minimap nodes',
+);
+
+const dragStart = await evaluate(`(() => {
+  const node = document.querySelector('.react-flow__node');
+  const rectangle = node?.getBoundingClientRect();
+  return rectangle === undefined
+    ? undefined
+    : { x: rectangle.left + 100, y: rectangle.top + 22, left: rectangle.left, top: rectangle.top };
+})()`);
+assert.notEqual(dragStart, undefined);
+await command('Input.dispatchMouseEvent', {
+  type: 'mouseMoved',
+  x: dragStart.x,
+  y: dragStart.y,
+});
+await command('Input.dispatchMouseEvent', {
+  type: 'mousePressed',
+  x: dragStart.x,
+  y: dragStart.y,
+  button: 'left',
+  buttons: 1,
+  clickCount: 1,
+});
+for (let step = 1; step <= 12; step += 1) {
+  await command('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: dragStart.x + (140 * step) / 12,
+    y: dragStart.y + (80 * step) / 12,
+    button: 'left',
+    buttons: 1,
+  });
+  assert.equal(
+    await evaluate(`
+      document.querySelectorAll('.react-flow__node').length === 1 &&
+      document.querySelectorAll('.react-flow__minimap-node').length === 1
+    `),
+    true,
+  );
+}
+await command('Input.dispatchMouseEvent', {
+  type: 'mouseReleased',
+  x: dragStart.x + 140,
+  y: dragStart.y + 80,
+  button: 'left',
+  buttons: 0,
+  clickCount: 1,
+});
+await waitFor(
+  `(() => {
+    const rectangle = document.querySelector('.react-flow__node')?.getBoundingClientRect();
+    return rectangle !== undefined &&
+      rectangle.left > ${dragStart.left + 100} &&
+      rectangle.top > ${dragStart.top + 50};
+  })()`,
+  'persisted node drag',
+);
+assert.match(
+  await evaluate('document.querySelector(".document-title small").innerText'),
+  /•/,
+);
+// React Flow suppresses the click immediately following a drag to prevent
+// accidental activation. Let that one-tick guard clear before using the toolbar.
+await new Promise((resolve) => setTimeout(resolve, 100));
 
 assert.equal(
   await evaluate(`(() => {
