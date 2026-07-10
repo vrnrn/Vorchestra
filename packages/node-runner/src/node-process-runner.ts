@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { stat } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { constants } from 'node:fs';
+import { access, stat } from 'node:fs/promises';
 
 import type {
   Artifact,
@@ -12,8 +12,14 @@ import type {
   ProcessRunRequest,
   ProcessRunResult,
 } from '@vorchestra/engine';
+import {
+  resolveProcessExecutableCandidates,
+  resolveProcessFilesystemPath,
+  resolveProcessWorkingDirectory,
+} from './path-resolution.js';
 
 export interface NodeProcessRunnerOptions {
+  readonly baseDirectory?: string;
   readonly terminationGracePeriodMs?: number;
   readonly now?: () => Date;
   readonly statPath?: (path: string) => Promise<PathMetadata>;
@@ -28,10 +34,12 @@ const DEFAULT_TERMINATION_GRACE_PERIOD_MS = 1_000;
 
 export class NodeProcessRunner implements ProcessRunner {
   readonly #terminationGracePeriodMs: number;
+  readonly #baseDirectory: string;
   readonly #now: () => Date;
   readonly #statPath: (path: string) => Promise<PathMetadata>;
 
   constructor(options: NodeProcessRunnerOptions = {}) {
+    this.#baseDirectory = resolveProcessWorkingDirectory(options.baseDirectory);
     this.#terminationGracePeriodMs =
       options.terminationGracePeriodMs ?? DEFAULT_TERMINATION_GRACE_PERIOD_MS;
     this.#now = options.now ?? (() => new Date());
@@ -58,10 +66,15 @@ export class NodeProcessRunner implements ProcessRunner {
       });
     }
 
-    const workingDirectoryFailure = await validateWorkingDirectory(
+    const workingDirectory = resolveProcessWorkingDirectory(
       request.workingDirectory,
-      this.#statPath,
+      this.#baseDirectory,
     );
+    const resolvedRequest = { ...request, workingDirectory };
+    const workingDirectoryFailure =
+      request.workingDirectory === undefined
+        ? undefined
+        : await validateWorkingDirectory(workingDirectory, this.#statPath);
     if (options.signal.aborted) {
       return cancelledResult('', '', null);
     }
@@ -69,8 +82,33 @@ export class NodeProcessRunner implements ProcessRunner {
       return failedResult('', '', null, workingDirectoryFailure);
     }
 
+    if (!request.shell) {
+      const resolvedExecutable = await resolveDirectExecutable(
+        request.executable,
+        workingDirectory,
+        request.environment.PATH,
+      );
+      if (options.signal.aborted) {
+        return cancelledResult('', '', null);
+      }
+      if (resolvedExecutable === undefined) {
+        return failedResult('', '', null, {
+          code: 'executable_not_found',
+          message:
+            request.environment.PATH === undefined &&
+            !request.executable.includes('/') &&
+            !request.executable.includes('\\')
+              ? `Executable could not be resolved because PATH is not declared: ${request.executable}`
+              : `Executable was not found or is not executable: ${request.executable}`,
+          nextAction:
+            "Install the executable or expose it through the block's declared PATH binding.",
+        });
+      }
+      resolvedRequest.executable = resolvedExecutable;
+    }
+
     const processResult = await runChildProcess(
-      request,
+      resolvedRequest,
       options.signal,
       this.#terminationGracePeriodMs,
     );
@@ -85,7 +123,11 @@ export class NodeProcessRunner implements ProcessRunner {
         processResult.exitCode,
       );
     }
-    return this.#produceArtifacts(request, processResult, options.signal);
+    return this.#produceArtifacts(
+      resolvedRequest,
+      processResult,
+      options.signal,
+    );
   }
 
   async #produceArtifacts(
@@ -189,6 +231,29 @@ export class NodeProcessRunner implements ProcessRunner {
 
     return { ...processResult, artifacts };
   }
+}
+
+async function resolveDirectExecutable(
+  executable: string,
+  workingDirectory: string,
+  pathValue: string | undefined,
+): Promise<string | undefined> {
+  const candidates = resolveProcessExecutableCandidates(
+    executable,
+    workingDirectory,
+    pathValue,
+  );
+  for (const candidate of candidates) {
+    try {
+      const metadata = await stat(candidate);
+      if (!metadata.isFile()) continue;
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue through the explicitly declared candidates only.
+    }
+  }
+  return undefined;
 }
 
 async function validateWorkingDirectory(
@@ -389,9 +454,10 @@ async function createFilesystemArtifact(
   | { readonly artifact: FilesystemReferenceArtifact }
   | { readonly failure: ExecutionFailure }
 > {
-  const path = isAbsolute(output.path)
-    ? output.path
-    : resolve(request.workingDirectory ?? process.cwd(), output.path);
+  const path = resolveProcessFilesystemPath(
+    output.path,
+    request.workingDirectory,
+  );
   try {
     const metadata = await statPath(path);
     const actualEntity = metadata.isFile()

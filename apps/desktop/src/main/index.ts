@@ -1,19 +1,41 @@
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { parseRunnableWorkflow } from '../shared/authority.js';
 import {
+  parseWorkflowDefinition,
+  parseWorkflowRunInputs,
+  preflightWorkflow,
+  type WorkflowPreflightResult,
+} from '@vorchestra/engine';
+import { NodeWorkflowPreflight } from '@vorchestra/node-runner';
+import {
   IPC_CHANNELS,
+  type PreflightWorkflowRequest,
   type SaveWorkflowRequest,
   type SaveWorkflowResult,
+  type SelectFilesystemPathRequest,
+  type SelectFilesystemPathResult,
+  type RunHistoryRecord,
+  type RunWorkflowRequest,
   type WorkflowFileResult,
 } from '../shared/contracts.js';
-import { startWorkflowRun } from './runtime.js';
+import { revealFilesystemPath, selectFilesystemPath } from './path-actions.js';
+import {
+  applyDefaultWorkingDirectory,
+  resolveDesktopWorkflowBaseDirectory,
+  startWorkflowRun,
+} from './runtime.js';
 import { ActiveRunRegistry } from './run-registry.js';
+import { RunHistoryStore } from './run-history.js';
 import { readWorkflowFile, writeWorkflowFile } from './workflow-files.js';
+import { applyApplicationIdentity } from './application-identity.js';
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const activeRuns = new ActiveRunRegistry();
+const userDataOverride = app.commandLine.getSwitchValue('user-data-dir');
+if (userDataOverride !== '') app.setPath('userData', resolve(userDataOverride));
+applyApplicationIdentity(app);
 
 function createWindow(): void {
   const window = new BrowserWindow({
@@ -41,7 +63,10 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  registerIpc();
+  const runHistory = new RunHistoryStore(
+    join(app.getPath('userData'), 'run-history.json'),
+  );
+  registerIpc(runHistory);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -53,7 +78,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-function registerIpc(): void {
+function registerIpc(runHistory: RunHistoryStore): void {
   ipcMain.handle(
     IPC_CHANNELS.openWorkflow,
     async (): Promise<WorkflowFileResult> => {
@@ -102,13 +127,86 @@ function registerIpc(): void {
     },
   );
 
+  ipcMain.handle(
+    IPC_CHANNELS.selectFilesystemPath,
+    async (
+      _event,
+      request: SelectFilesystemPathRequest,
+    ): Promise<SelectFilesystemPathResult> =>
+      selectFilesystemPath(
+        {
+          showOpenDialog: (options) =>
+            dialog.showOpenDialog({
+              ...options,
+              properties: [...options.properties],
+            }),
+          showSaveDialog: (options) => dialog.showSaveDialog(options),
+        },
+        request,
+      ),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.revealFilesystemPath,
+    (_event, path: string): void => revealFilesystemPath(shell, path),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.listRunHistory,
+    (_event, workflowId: string): Promise<readonly RunHistoryRecord[]> =>
+      runHistory.list(workflowId),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.clearRunHistory,
+    (_event, workflowId: string): Promise<void> => runHistory.clear(workflowId),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.preflightWorkflow,
+    async (_event, input: unknown): Promise<WorkflowPreflightResult> => {
+      const request = input as Partial<PreflightWorkflowRequest>;
+      const baseDirectory = resolveDesktopWorkflowBaseDirectory(
+        request.workflowFilePath,
+        app.getPath('home'),
+      );
+      const workflow = applyDefaultWorkingDirectory(
+        parseWorkflowDefinition(request.workflow),
+        baseDirectory,
+      );
+      const runInputs = parseWorkflowRunInputs(request.runInputs ?? {});
+      return preflightWorkflow(
+        workflow,
+        new NodeWorkflowPreflight({ baseDirectory }),
+        { hostEnvironment: process.env, runInputs },
+      );
+    },
+  );
+
   ipcMain.handle(IPC_CHANNELS.runWorkflow, (event, input: unknown) => {
-    const workflow = parseRunnableWorkflow(input);
-    const run = startWorkflowRun(workflow, (runEvent) => {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send(IPC_CHANNELS.runEvent, runEvent);
-      }
-    });
+    const request = input as Partial<RunWorkflowRequest>;
+    const baseDirectory = resolveDesktopWorkflowBaseDirectory(
+      request.workflowFilePath,
+      app.getPath('home'),
+    );
+    const workflow = applyDefaultWorkingDirectory(
+      parseRunnableWorkflow(request.workflow),
+      baseDirectory,
+    );
+    const runInputs = parseWorkflowRunInputs(request.runInputs ?? {});
+    const run = startWorkflowRun(
+      workflow,
+      (runEvent) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send(IPC_CHANNELS.runEvent, runEvent);
+        }
+      },
+      {
+        baseDirectory,
+        runInputs,
+        onCompleted: (record) => runHistory.append(record),
+      },
+    );
     activeRuns.track(run);
     return { runId: run.runId };
   });

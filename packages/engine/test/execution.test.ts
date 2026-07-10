@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  canonicalizeWorkflowRunInputs,
   executeWorkflow,
   InvalidWorkflowError,
+  InvalidRunInputsError,
   parseWorkflowDefinition,
   type Artifact,
   type ArtifactKind,
@@ -16,6 +18,8 @@ import {
   type ProcessRunResult,
   type RuntimeEvent,
   type WorkflowDefinition,
+  type WorkflowInput,
+  type WorkflowRunInputs,
 } from '../src/index.js';
 
 test('resolves artifacts into process inputs and routes every v0.1 artifact kind', async () => {
@@ -480,6 +484,293 @@ test('fails actionably when a declared host environment value is missing', async
   );
 });
 
+test('preserves a generic process authentication failure from a host adapter', async () => {
+  const block = processBlock('authenticated-tool', [], []);
+  const runner = runnerFrom(async () => ({
+    status: 'failed',
+    exitCode: 1,
+    stdout: '',
+    stderr: 'authentication required',
+    artifacts: [],
+    failure: {
+      code: 'process_authentication_failed',
+      message: 'The local tool is not authenticated.',
+      nextAction: 'Authenticate the tool locally, then retry.',
+      exitCode: 1,
+    },
+  }));
+
+  const result = await executeWorkflow(workflowWith([block]), runner, {
+    runId: 'run-authentication-failure',
+  });
+
+  assert.equal(result.outcome, 'failed');
+  assert.deepEqual(result.blocks['authenticated-tool']?.failure, {
+    code: 'process_authentication_failed',
+    message: 'The local tool is not authenticated.',
+    nextAction: 'Authenticate the tool locally, then retry.',
+    exitCode: 1,
+  });
+});
+
+test('rejects missing, mismatched, and unknown run inputs before invoking the runner', async () => {
+  const block = processBlock(
+    'consumer',
+    [inputPort('prompt', 'text', true)],
+    [],
+  );
+  const workflow = workflowWith([block]);
+  workflow.inputs = [workflowInput('prompt', 'text', true)];
+  workflow.inputBindings = [
+    workflowInputBinding('prompt-consumer', 'prompt', 'consumer', 'prompt'),
+  ];
+  let calls = 0;
+  const runner = runnerFrom(async (request) => {
+    calls += 1;
+    return succeeded(request);
+  });
+
+  await assert.rejects(
+    executeWorkflow(workflow, runner, { runId: 'missing-run-input' }),
+    (error: unknown) =>
+      error instanceof InvalidRunInputsError &&
+      error.issues.some((issue) => issue.code === 'missing_required_run_input'),
+  );
+  await assert.rejects(
+    executeWorkflow(workflow, runner, {
+      runId: 'mismatched-run-input',
+      runInputs: {
+        prompt: { kind: 'json', value: { prompt: 'wrong kind' } },
+      } as WorkflowRunInputs,
+    }),
+    (error: unknown) =>
+      error instanceof InvalidRunInputsError &&
+      error.issues.some((issue) => issue.code === 'run_input_kind_mismatch'),
+  );
+  await assert.rejects(
+    executeWorkflow(workflow, runner, {
+      runId: 'unknown-run-input',
+      runInputs: {
+        prompt: { kind: 'text', value: 'known' },
+        extra: { kind: 'text', value: 'unknown' },
+      },
+    }),
+    (error: unknown) =>
+      error instanceof InvalidRunInputsError &&
+      error.issues.some((issue) => issue.code === 'unknown_run_input'),
+  );
+  await assert.rejects(
+    executeWorkflow(workflow, runner, {
+      runId: 'invalid-run-input-json',
+      runInputs: {
+        prompt: { kind: 'json', value: Number.NaN },
+      } as WorkflowRunInputs,
+    }),
+    (error: unknown) =>
+      error instanceof InvalidRunInputsError &&
+      error.issues.some((issue) => issue.code === 'invalid_run_inputs'),
+  );
+
+  assert.equal(calls, 0);
+});
+
+test('routes all workflow input kinds with explicit supplied provenance', async () => {
+  const block = processBlock(
+    'consumer',
+    [
+      inputPort('message', 'text'),
+      inputPort('config', 'json'),
+      inputPort('folder', 'filesystem-reference'),
+    ],
+    [],
+  );
+  const workflow = workflowWith([block]);
+  workflow.inputs = [
+    workflowInput('message', 'text', true),
+    workflowInput('config', 'json', true),
+    workflowInput('folder', 'filesystem-reference', true),
+  ];
+  workflow.inputBindings = workflow.inputs.map((input) =>
+    workflowInputBinding(
+      `${input.id}-consumer`,
+      input.id,
+      'consumer',
+      input.id,
+    ),
+  );
+  let request: ProcessRunRequest | undefined;
+  const runner = runnerFrom(async (nextRequest) => {
+    request = nextRequest;
+    return succeeded(nextRequest);
+  });
+
+  const result = await executeWorkflow(workflow, runner, {
+    runId: 'workflow-input-kinds',
+    runInputs: {
+      message: { kind: 'text', value: 'hello' },
+      config: { kind: 'json', value: { level: 2 } },
+      folder: {
+        kind: 'filesystem-reference',
+        path: '/workspace/input',
+        entity: 'directory',
+      },
+    },
+    now: () => '2026-07-09T21:00:00.000Z',
+  });
+
+  assert.deepEqual(request?.arguments, [
+    'hello',
+    '{"level":2}',
+    '/workspace/input',
+  ]);
+  assert.deepEqual(result.blocks.consumer?.inputs.message, {
+    id: '["workflow-input-kinds","workflow-input","message"]',
+    kind: 'text',
+    value: 'hello',
+    provenance: {
+      source: 'workflow-input',
+      runId: 'workflow-input-kinds',
+      inputId: 'message',
+      createdAt: '2026-07-09T21:00:00.000Z',
+      valueSource: 'supplied',
+    },
+  });
+  assert.equal(result.blocks.consumer?.inputs.config?.kind, 'json');
+  assert.deepEqual(result.blocks.consumer?.inputs.folder, {
+    id: '["workflow-input-kinds","workflow-input","folder"]',
+    kind: 'filesystem-reference',
+    path: '/workspace/input',
+    entity: 'directory',
+    provenance: {
+      source: 'workflow-input',
+      runId: 'workflow-input-kinds',
+      inputId: 'folder',
+      createdAt: '2026-07-09T21:00:00.000Z',
+      valueSource: 'supplied',
+    },
+  });
+});
+
+test('uses only explicitly serialized workflow input defaults', async () => {
+  const block = processBlock('consumer', [inputPort('message', 'text')], []);
+  const workflow = workflowWith([block]);
+  workflow.inputs = [
+    {
+      ...workflowInput('message', 'text', true),
+      defaultValue: { kind: 'text', value: 'serialized default' },
+    },
+  ];
+  workflow.inputBindings = [
+    workflowInputBinding('message-consumer', 'message', 'consumer', 'message'),
+  ];
+  let request: ProcessRunRequest | undefined;
+  const runner = runnerFrom(async (nextRequest) => {
+    request = nextRequest;
+    return succeeded(nextRequest);
+  });
+
+  const result = await executeWorkflow(workflow, runner, {
+    runId: 'default-run-input',
+    now: () => '2026-07-09T21:01:00.000Z',
+  });
+
+  assert.deepEqual(request?.arguments, ['serialized default']);
+  assert.deepEqual(result.blocks.consumer?.inputs.message?.provenance, {
+    source: 'workflow-input',
+    runId: 'default-run-input',
+    inputId: 'message',
+    createdAt: '2026-07-09T21:01:00.000Z',
+    valueSource: 'default',
+  });
+});
+
+test('runs one unchanged workflow twice with different supplied values', async () => {
+  const block = processBlock('consumer', [inputPort('message', 'text')], []);
+  const workflow = workflowWith([block]);
+  workflow.inputs = [workflowInput('message', 'text', true)];
+  workflow.inputBindings = [
+    workflowInputBinding('message-consumer', 'message', 'consumer', 'message'),
+  ];
+  const observedArguments: string[][] = [];
+  const runner = runnerFrom(async (request) => {
+    observedArguments.push([...request.arguments]);
+    return succeeded(request);
+  });
+
+  await executeWorkflow(workflow, runner, {
+    runId: 'first-parameterized-run',
+    runInputs: { message: { kind: 'text', value: 'first' } },
+  });
+  await executeWorkflow(workflow, runner, {
+    runId: 'second-parameterized-run',
+    runInputs: { message: { kind: 'text', value: 'second' } },
+  });
+
+  assert.deepEqual(observedArguments, [['first'], ['second']]);
+  assert.equal(workflow.inputs[0]?.defaultValue, undefined);
+});
+
+test('canonicalizes supplied and default filesystem run inputs without mutating portable values', () => {
+  const workflow = workflowWith([]);
+  workflow.inputs = [
+    {
+      ...workflowInput('supplied-file', 'filesystem-reference', true),
+    },
+    {
+      ...workflowInput('default-folder', 'filesystem-reference', false),
+      defaultValue: {
+        kind: 'filesystem-reference',
+        path: './portable-folder',
+        entity: 'directory',
+      },
+    },
+    workflowInput('message', 'text', true),
+  ];
+  const supplied: WorkflowRunInputs = {
+    'supplied-file': {
+      kind: 'filesystem-reference',
+      path: './portable-file.txt',
+      entity: 'file',
+    },
+    message: { kind: 'text', value: 'unchanged' },
+  };
+
+  const canonical = canonicalizeWorkflowRunInputs(
+    workflow,
+    supplied,
+    (path, inputId) => `/resolved/${inputId}/${path.replace(/^\.\//, '')}`,
+  );
+
+  assert.deepEqual(
+    { ...canonical },
+    {
+      'supplied-file': {
+        kind: 'filesystem-reference',
+        path: '/resolved/supplied-file/portable-file.txt',
+        entity: 'file',
+      },
+      'default-folder': {
+        kind: 'filesystem-reference',
+        path: '/resolved/default-folder/portable-folder',
+        entity: 'directory',
+      },
+      message: { kind: 'text', value: 'unchanged' },
+    },
+  );
+  assert.equal(
+    supplied['supplied-file']?.kind === 'filesystem-reference'
+      ? supplied['supplied-file'].path
+      : undefined,
+    './portable-file.txt',
+  );
+  assert.equal(
+    workflow.inputs[1]?.defaultValue?.kind === 'filesystem-reference'
+      ? workflow.inputs[1].defaultValue.path
+      : undefined,
+    './portable-folder',
+  );
+});
+
 test('omits unconnected optional input bindings from args, stdin, and environment', async () => {
   const block = processBlock(
     'optional',
@@ -735,9 +1026,11 @@ function workflowWith(
   connections: WorkflowDefinition['connections'] = [],
 ): WorkflowDefinition {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'execution-workflow',
     name: 'Execution workflow',
+    inputs: [],
+    inputBindings: [],
     blocks,
     connections,
   };
@@ -788,6 +1081,27 @@ function outputPort(
   artifactKind: ArtifactKind = 'text',
 ): OutputPort {
   return { id, name: id, artifactKind };
+}
+
+function workflowInput(
+  id: string,
+  artifactKind: ArtifactKind,
+  required: boolean,
+): WorkflowInput {
+  return { id, name: id, artifactKind, required };
+}
+
+function workflowInputBinding(
+  id: string,
+  inputId: string,
+  targetBlockId: string,
+  targetPortId: string,
+): WorkflowDefinition['inputBindings'][number] {
+  return {
+    id,
+    inputId,
+    to: { blockId: targetBlockId, portId: targetPortId },
+  };
 }
 
 function connection(

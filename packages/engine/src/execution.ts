@@ -6,7 +6,12 @@ import type {
   ProcessRunRequest,
   ProcessRunResult,
 } from './runner.js';
-import type { ProcessBlock, WorkflowDefinition } from './schema.js';
+import { resolveWorkflowRunInputArtifacts } from './run-inputs.js';
+import type {
+  ProcessBlock,
+  WorkflowDefinition,
+  WorkflowRunInputs,
+} from './schema.js';
 import type {
   BlockSkipReason,
   BlockTerminalState,
@@ -42,6 +47,7 @@ export interface WorkflowExecutionOptions {
   readonly runId?: string;
   readonly signal?: AbortSignal;
   readonly hostEnvironment?: Readonly<Record<string, string | undefined>>;
+  readonly runInputs?: WorkflowRunInputs;
   readonly onEvent?: (event: RuntimeEvent) => void;
   /** Intended for deterministic hosts and tests. Values should be ISO-8601 strings. */
   readonly now?: () => string;
@@ -61,6 +67,7 @@ interface ExecutionContext {
   readonly now: () => string;
   readonly emit: (payload: RuntimeEventPayload, occurredAt?: string) => void;
   readonly results: Map<string, BlockExecutionResult>;
+  readonly workflowInputArtifacts: ReadonlyMap<string, Artifact>;
 }
 
 class ResolutionError extends Error {
@@ -111,6 +118,12 @@ export async function executeWorkflow(
   };
 
   const startedAt = now();
+  const workflowInputArtifacts = resolveWorkflowRunInputArtifacts(
+    workflow,
+    options.runInputs,
+    runId,
+    startedAt,
+  );
   emit({ type: 'execution_started', workflowId: workflow.id }, startedAt);
   for (const block of workflow.blocks) {
     emit({ type: 'block_queued', blockId: block.id });
@@ -138,6 +151,7 @@ export async function executeWorkflow(
     now,
     emit,
     results,
+    workflowInputArtifacts,
   };
 
   const blocks = new Map(workflow.blocks.map((block) => [block.id, block]));
@@ -290,7 +304,12 @@ async function executeBlock(
   let inputs: Readonly<Record<string, Artifact>> = keyedRecord();
   let request: ProcessRunRequest;
   try {
-    inputs = resolveInputs(workflow, block, context.results);
+    inputs = resolveInputs(
+      workflow,
+      block,
+      context.results,
+      context.workflowInputArtifacts,
+    );
     context.emit({
       type: 'block_inputs_resolved',
       blockId: block.id,
@@ -447,8 +466,14 @@ function resolveInputs(
   workflow: WorkflowDefinition,
   block: ProcessBlock,
   results: ReadonlyMap<string, BlockExecutionResult>,
+  workflowInputArtifacts: ReadonlyMap<string, Artifact>,
 ): Readonly<Record<string, Artifact>> {
   const inputs = keyedRecord<Artifact>();
+  for (const binding of workflow.inputBindings) {
+    if (binding.to.blockId !== block.id) continue;
+    const artifact = workflowInputArtifacts.get(binding.inputId);
+    if (artifact !== undefined) inputs[binding.to.portId] = artifact;
+  }
   for (const connection of workflow.connections) {
     if (connection.to.blockId !== block.id) {
       continue;
@@ -568,9 +593,13 @@ function routeProducedArtifacts(
     resolveOutputSpecs(block).map((spec) => [spec.portId, spec.kind]),
   );
   for (const artifact of result.artifacts) {
-    const portId = artifact.provenance.portId;
+    const portId =
+      'portId' in artifact.provenance
+        ? artifact.provenance.portId
+        : '(workflow-input)';
     const expectedKind = expected.get(portId);
     if (
+      !('blockId' in artifact.provenance) ||
       artifact.provenance.runId !== context.runId ||
       artifact.provenance.blockId !== block.id ||
       expectedKind === undefined ||

@@ -1,11 +1,13 @@
 import { memo } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { BlockExecutionState, ProcessBlock } from '@vorchestra/engine';
-import { Box, TerminalSquare } from 'lucide-react';
+import { Bot, Box, TerminalSquare } from 'lucide-react';
+import type { AgentRuntimeId } from '../../shared/agent-runtime';
 
 export interface ProcessNodeData extends Record<string, unknown> {
   readonly block: ProcessBlock;
   readonly status: BlockExecutionState | 'idle';
+  readonly agentRuntime?: AgentRuntimeId;
 }
 
 export type ProcessFlowNode = Node<ProcessNodeData, 'process'>;
@@ -14,21 +16,33 @@ export const ProcessNode = memo(function ProcessNode({
   data,
   selected,
 }: NodeProps<ProcessFlowNode>) {
-  const { block, status } = data;
+  const { agentRuntime, block, status } = data;
   return (
     <article
       className={`process-node state-${status} ${selected ? 'selected' : ''}`}
+      aria-label={`${agentRuntime === undefined ? 'Process' : 'AI Agent'} ${block.name}, ${status}`}
     >
       <div className="node-accent" />
       <header>
         <span className="node-icon">
-          <TerminalSquare size={14} />
+          {agentRuntime === undefined ? (
+            <TerminalSquare size={14} />
+          ) : (
+            <Bot size={14} />
+          )}
         </span>
         <span className="node-title">{block.name}</span>
-        <span className={`status-dot ${status}`} title={status} />
+        <span
+          className={`status-dot ${status}`}
+          title={status}
+          aria-hidden="true"
+        />
       </header>
       <div className="node-command">
         <code>{block.invocation.executable}</code>
+        {agentRuntime !== undefined && (
+          <span className="agent-runtime-pill">{agentRuntime}</span>
+        )}
         {block.invocation.shell && <span className="shell-pill">shell</span>}
       </div>
       <div className="ports inputs">

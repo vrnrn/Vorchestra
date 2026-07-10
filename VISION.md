@@ -6,7 +6,8 @@
 
 - **Status:** Living product vision
 - **Last updated:** 2026-07-09
-- **Current horizon:** v0.1 implemented for macOS
+- **Current horizon:** v0.2 Apple silicon release; intentionally unsigned
+  distribution
 
 This document is Vorchestra's durable product compass. It records the problem we
 are solving, the product boundaries, and the decisions that should guide design
@@ -340,32 +341,44 @@ or integrations available.
 Decisions remain in this log even if superseded. A replacement decision must
 cite the decision it changes.
 
-| ID      | Date       | Decision                                                                                     | Rationale                                                                                                                                               |
-| ------- | ---------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| VOR-001 | 2026-07-09 | Target solo developers as the primary v0.1 user.                                             | A narrow initial audience gives product and usability decisions a concrete center.                                                                      |
-| VOR-002 | 2026-07-09 | Ship v0.1 as a local desktop application.                                                    | The editor and local process engine need a coherent experience with direct operating-system access.                                                     |
-| VOR-003 | 2026-07-09 | Use a trusted-with-guardrails execution model.                                               | Arbitrary local execution must be visible and explicit, while full sandboxing would overwhelm the first product.                                        |
-| VOR-004 | 2026-07-09 | Support text, JSON, and filesystem references as v0.1 artifacts.                             | File-oriented CLIs must be useful without storing binary content inside workflow state.                                                                 |
-| VOR-005 | 2026-07-09 | Restrict v0.1 workflows to validated DAGs.                                                   | Cycles require iteration, buffering, termination, and deadlock semantics that are outside the MVP.                                                      |
-| VOR-006 | 2026-07-09 | Separate artifacts from runtime events.                                                      | Workflow data should not be conflated with failures, status, cancellation, or diagnostics.                                                              |
-| VOR-007 | 2026-07-09 | Make direct executable-and-argument invocation the default and shell evaluation explicit.    | This preserves predictable process boundaries and makes additional shell authority visible.                                                             |
-| VOR-008 | 2026-07-09 | Keep the execution engine independent of the UI and provider-specific concepts.              | Alternative interfaces and future specialized editors must share one predictable runtime.                                                               |
-| VOR-009 | 2026-07-09 | Use Electron as the v0.1 desktop runtime with context isolation and a narrow preload bridge. | Electron keeps the first vertical slice in TypeScript and provides local process and filesystem APIs without coupling them to renderer code.            |
-| VOR-010 | 2026-07-09 | Accept and distribute the v0.1 desktop release for macOS first.                              | The current environment can prove macOS process-tree cancellation and desktop behavior; other packaged platforms require their own acceptance evidence. |
+| ID      | Date       | Decision                                                                                                                                             | Rationale                                                                                                                                                                              |
+| ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| VOR-001 | 2026-07-09 | Target solo developers as the primary v0.1 user.                                                                                                     | A narrow initial audience gives product and usability decisions a concrete center.                                                                                                     |
+| VOR-002 | 2026-07-09 | Ship v0.1 as a local desktop application.                                                                                                            | The editor and local process engine need a coherent experience with direct operating-system access.                                                                                    |
+| VOR-003 | 2026-07-09 | Use a trusted-with-guardrails execution model.                                                                                                       | Arbitrary local execution must be visible and explicit, while full sandboxing would overwhelm the first product.                                                                       |
+| VOR-004 | 2026-07-09 | Support text, JSON, and filesystem references as v0.1 artifacts.                                                                                     | File-oriented CLIs must be useful without storing binary content inside workflow state.                                                                                                |
+| VOR-005 | 2026-07-09 | Restrict v0.1 workflows to validated DAGs.                                                                                                           | Cycles require iteration, buffering, termination, and deadlock semantics that are outside the MVP.                                                                                     |
+| VOR-006 | 2026-07-09 | Separate artifacts from runtime events.                                                                                                              | Workflow data should not be conflated with failures, status, cancellation, or diagnostics.                                                                                             |
+| VOR-007 | 2026-07-09 | Make direct executable-and-argument invocation the default and shell evaluation explicit.                                                            | This preserves predictable process boundaries and makes additional shell authority visible.                                                                                            |
+| VOR-008 | 2026-07-09 | Keep the execution engine independent of the UI and provider-specific concepts.                                                                      | Alternative interfaces and future specialized editors must share one predictable runtime.                                                                                              |
+| VOR-009 | 2026-07-09 | Use Electron as the v0.1 desktop runtime with context isolation and a narrow preload bridge.                                                         | Electron keeps the first vertical slice in TypeScript and provides local process and filesystem APIs without coupling them to renderer code.                                           |
+| VOR-010 | 2026-07-09 | Accept and distribute the v0.1 desktop release for macOS first.                                                                                      | The current environment can prove macOS process-tree cancellation and desktop behavior; other packaged platforms require their own acceptance evidence.                                |
+| VOR-011 | 2026-07-09 | Include a Codex block as the first specialized block editor targeted for v0.2.                                                                       | Codex non-interactive mode is a strong test of visual CLI composition; the editor must compile visibly to the generic process contract without adding provider behavior to the engine. |
+| VOR-012 | 2026-07-09 | Supersede VOR-011 with a provider-selectable AI Agent block, launching with Codex as its first provider.                                             | The stable user concept is an agent role; provider-specific desktop compilers can improve configuration while preserving one generic process contract in the engine.                   |
+| VOR-013 | 2026-07-09 | Supersede VOR-012's selector terminology: the AI Agent block selects an Agent runtime, with Codex as the only v0.2 runtime.                          | Codex is the executable agent implementation, while provider and model are separate concepts that may exist inside a future runtime.                                                   |
+| VOR-014 | 2026-07-09 | Pass the v0.2 AI Agent instruction exactly as a visible CLI argument; keep connected text context as a separate stdin binding.                       | This makes instruction delivery deterministic and inspectable without hidden prompt composition.                                                                                       |
+| VOR-015 | 2026-07-09 | Run the v0.2 AI Agent directly in its resolved current working directory without creating a Git worktree.                                            | Worktree isolation requires branch, cleanup, merge, artifact, and conflict semantics that belong to a future release.                                                                  |
+| VOR-016 | 2026-07-09 | Defer AI Agent model overrides and other runtime-specific capability settings beyond v0.2.                                                           | The first release should prove the generic runtime compiler before a second runtime demonstrates which specialized settings are durable.                                               |
+| VOR-017 | 2026-07-09 | Let the v0.2 AI Agent explicitly opt into workspace-write authority and expose generated files through declared filesystem-reference outputs.        | Agent workflows must be able to create useful local files, while a read-only default and declared output paths keep the additional authority visible.                                  |
+| VOR-018 | 2026-07-09 | Retain local run history for 30 days with a 100 MiB application-wide limit, pruning the oldest runs first.                                           | A time and size bound makes post-restart debugging useful without allowing sensitive diagnostics to grow without limit.                                                                |
+| VOR-019 | 2026-07-09 | Do not maintain a separate remembered-value cache for workflow inputs; only explicit serialized defaults travel with a workflow.                     | Executed values already belong to sensitive local run history for inspection and rerun, while portable definitions should not silently accumulate machine-local or secret-like values. |
+| VOR-020 | 2026-07-09 | Treat filesystem output declarations as post-process verification only.                                                                              | The invoked process remains responsible for creating or updating the path; Vorchestra resolves and validates the declared reference after success.                                     |
+| VOR-021 | 2026-07-09 | Migrate v1 workflows to a canonical v2 format that adds workflow inputs and generic, opaque editor metadata.                                         | Run inputs require portable contracts, while opaque editor metadata can restore specialized editors without introducing Agent runtime concepts into engine execution.                  |
+| VOR-022 | 2026-07-09 | Resolve a blank desktop working directory to the opened workflow file's directory, or the user's home directory for an unsaved workflow.             | Packaged applications cannot rely on an ambient launch directory; the effective local authority must be deterministic and visible.                                                     |
+| VOR-023 | 2026-07-09 | Resolve explicit relative working directories and filesystem run inputs against the same desktop workflow base used by preflight and execution.      | Portable relative values remain unchanged in saved workflows, while one shared host base prevents authority review from describing a different path than the process receives.         |
+| VOR-024 | 2026-07-09 | Distribute Vorchestra v0.2 for macOS without Developer ID signing or Apple notarization.                                                             | State the missing publisher and malware-review assurances plainly, publish Apple silicon artifacts with checksums, and document macOS's manual override path.                          |
+| VOR-025 | 2026-07-09 | Support Apple silicon Macs only for the v0.2 packaged release.                                                                                       | The current host can execute and measure arm64 artifacts directly; Intel packaging and matching-hardware acceptance do not justify expanding the first public release.                 |
+| VOR-026 | 2026-07-10 | Accept v0.2 through automated and packaged testing on the supported Apple silicon development host; do not require a fresh macOS account or machine. | Clean-account installation and removal exercises do not add product-code confidence proportionate to their cost and are not a release gate.                                            |
 
 ## Open questions
 
-These questions concern post-v0.1 direction or implementation validation. They
-do not block the v0.1 product contract above.
+These questions concern post-v0.2 direction or later implementation validation.
+They do not block the current release contract.
 
-- What is the smallest useful sandboxing or capability-grant model after v0.1?
-- Should execution history persist across application restarts, and what
-  retention policy should it use?
+- What is the smallest useful sandboxing or capability-grant model after v0.2?
 - How should portable workflows declare tool-version expectations without making
   Vorchestra a package manager?
 - Which trigger type should be introduced first after manual execution?
-- When specialized block editors arrive, how will their compiled generic process
-  representation remain visible and debuggable?
 - What explicit iteration model, if any, should eventually permit cycles?
 - Which artifact kinds should follow filesystem references: managed files,
   streams, binary blobs, or structured datasets?
@@ -375,7 +388,7 @@ do not block the v0.1 product contract above.
 This is a living document, but it should not drift silently.
 
 - Update the relevant section whenever a product decision changes the target
-  user, product thesis, trust boundary, v0.1 scope, or architectural
+  user, product thesis, trust boundary, current release scope, or architectural
   constraints.
 - Add a dated decision-log entry for every material choice. Superseding entries
   reference the earlier decision rather than deleting it.

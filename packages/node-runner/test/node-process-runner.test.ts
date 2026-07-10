@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -100,6 +100,44 @@ test('rejects invalid environment names instead of silently dropping them', asyn
       assert.equal(result.failure.code, 'process_launch_failed');
       assert.match(result.failure.message, /Environment variable name/);
     }
+  }
+});
+
+test('resolves bare executables only through the explicitly declared PATH', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'vorchestra-node-runner-'));
+  const executable = join(directory, 'declared-tool');
+  try {
+    await symlink(process.execPath, executable);
+
+    const declared = await runner.run(
+      {
+        ...baseRequest(),
+        executable: 'declared-tool',
+        arguments: ['-e', 'process.stdout.write("declared")'],
+        environment: { PATH: directory },
+      },
+      unaborted(),
+    );
+    assert.equal(declared.status, 'succeeded');
+    assert.equal(declared.stdout, 'declared');
+
+    const ambientFallback = await runner.run(
+      {
+        ...baseRequest(),
+        executable: 'node',
+        arguments: ['-e', 'process.stdout.write("must-not-run")'],
+        environment: {},
+      },
+      unaborted(),
+    );
+    assert.equal(ambientFallback.status, 'failed');
+    assert.equal(ambientFallback.stdout, '');
+    if (ambientFallback.status === 'failed') {
+      assert.equal(ambientFallback.failure.code, 'executable_not_found');
+      assert.match(ambientFallback.failure.message, /PATH is not declared/);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

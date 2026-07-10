@@ -1,18 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { validateWorkflow, type WorkflowDefinition } from '@vorchestra/engine';
+import {
+  validateWorkflow,
+  type ProcessBlock,
+  type WorkflowDefinition,
+} from '@vorchestra/engine';
 import { createProcessBlock, createWorkflow } from '../src/shared/defaults';
+import { setAgentBlockPresentation } from '../src/shared/agent-runtime';
 import { parseRunnableWorkflow } from '../src/shared/authority';
 import {
   addInputPort,
   addOutputPort,
+  autoArrangeWorkflow,
   connectBlocks,
+  copyProcessBlock,
+  createWorkflowHistory,
+  duplicateProcessBlock,
   moveListItem,
   moveRecordEntry,
+  pasteProcessBlock,
   reconcileProcessNodes,
+  redoWorkflowHistory,
   removeBlock,
   removeInputPort,
   removeOutputPort,
   setBlockPosition,
+  pushWorkflowHistory,
+  undoWorkflowHistory,
 } from '../src/renderer/src/workflow';
 
 describe('desktop workflow editing', () => {
@@ -51,6 +64,149 @@ describe('desktop workflow editing', () => {
     expect(Object.keys(environment)).toEqual(['PATH', 'MODE', 'HOME']);
   });
 
+  it('copies and pastes detached block configuration with fresh IDs', () => {
+    const block = configuredBlock();
+    const workflow: WorkflowDefinition = {
+      ...createWorkflow(),
+      blocks: [block],
+      connections: [],
+      layout: { blockPositions: { source: { x: 10, y: 20 } } },
+    };
+    const clipboard = copyProcessBlock(workflow, 'source');
+    expect(clipboard).toBeDefined();
+
+    const first = pasteProcessBlock(workflow, clipboard!, {
+      createId: () => 'source',
+    });
+    const second = pasteProcessBlock(first.workflow, clipboard!, {
+      createId: () => 'source',
+    });
+    const pasted = first.workflow.blocks.at(-1)!;
+
+    expect(first.blockId).toBe('source-copy');
+    expect(second.blockId).toBe('source-copy-2');
+    expect(first.workflow.layout?.blockPositions[first.blockId]).toEqual({
+      x: 58,
+      y: 68,
+    });
+    expect(second.workflow.layout?.blockPositions[second.blockId]).toEqual({
+      x: 106,
+      y: 116,
+    });
+    expect(pasted).toEqual({ ...block, id: first.blockId });
+    expect(pasted).not.toBe(block);
+    expect(pasted.inputs).not.toBe(block.inputs);
+    expect(pasted.invocation.arguments).not.toBe(block.invocation.arguments);
+    expect(Object.keys(pasted.invocation.environment)).toEqual([
+      'PATH',
+      'MODE',
+    ]);
+    expect(first.workflow.connections).toEqual([]);
+    expect(validateWorkflow(first.workflow)).toEqual({
+      valid: true,
+      issues: [],
+    });
+  });
+
+  it('duplicates a block through the same fresh-ID paste contract', () => {
+    const workflow: WorkflowDefinition = {
+      ...createWorkflow(),
+      blocks: [configuredBlock()],
+      connections: [],
+    };
+
+    const duplicate = duplicateProcessBlock(workflow, 'source', {
+      createId: () => 'duplicate',
+      offset: { x: 25, y: 30 },
+    });
+
+    expect(duplicate?.blockId).toBe('duplicate');
+    expect(duplicate?.workflow.blocks.map((block) => block.id)).toEqual([
+      'source',
+      'duplicate',
+    ]);
+    expect(duplicate?.workflow.layout?.blockPositions.duplicate).toEqual({
+      x: 185,
+      y: 170,
+    });
+    expect(duplicateProcessBlock(workflow, 'missing')).toBeUndefined();
+  });
+
+  it('auto-arranges dependency layers deterministically when requested', () => {
+    const source = createProcessBlock('source');
+    const free = createProcessBlock('free');
+    const left = addInputPort(createProcessBlock('left'));
+    const right = addInputPort(createProcessBlock('right'));
+    const join = addInputPort(addInputPort(createProcessBlock('join')));
+    const workflow: WorkflowDefinition = {
+      ...createWorkflow(),
+      blocks: [join, right, source, left, free],
+      connections: [
+        connection('source-left', 'source', 'left', left.inputs[0]!.id),
+        connection('source-right', 'source', 'right', right.inputs[0]!.id),
+        connection('left-join', 'left', 'join', join.inputs[0]!.id),
+        connection('right-join', 'right', 'join', join.inputs[1]!.id),
+      ],
+    };
+
+    const arranged = autoArrangeWorkflow(workflow, {
+      origin: { x: 100, y: 50 },
+      columnGap: 250,
+      rowGap: 100,
+    });
+
+    expect(arranged.layout?.blockPositions).toEqual({
+      join: { x: 600, y: 50 },
+      right: { x: 350, y: 50 },
+      source: { x: 100, y: 50 },
+      left: { x: 350, y: 150 },
+      free: { x: 100, y: 150 },
+    });
+    expect(
+      autoArrangeWorkflow(workflow, {
+        origin: { x: 100, y: 50 },
+        columnGap: 250,
+        rowGap: 100,
+      }).layout,
+    ).toEqual(arranged.layout);
+    expect(workflow.layout).toEqual(createWorkflow().layout);
+  });
+
+  it('keeps a bounded pure undo/redo history and clears redo on a new edit', () => {
+    const initial = createWorkflow();
+    const renamed = { ...initial, name: 'Renamed' };
+    const expanded = {
+      ...renamed,
+      blocks: [...renamed.blocks, createProcessBlock('second')],
+    };
+    const final = { ...expanded, name: 'Final' };
+    let history = createWorkflowHistory(initial, 2);
+
+    history = pushWorkflowHistory(history, renamed);
+    history = pushWorkflowHistory(history, expanded);
+    history = pushWorkflowHistory(history, final);
+    expect(history.past.map((workflow) => workflow.name)).toEqual([
+      'Renamed',
+      'Renamed',
+    ]);
+    expect(history.past[0]?.blocks).toHaveLength(1);
+    expect(history.past[1]?.blocks).toHaveLength(2);
+
+    history = undoWorkflowHistory(history);
+    expect(history.present).toBe(expanded);
+    expect(history.future).toEqual([final]);
+    history = undoWorkflowHistory(history);
+    expect(history.present).toBe(renamed);
+    history = redoWorkflowHistory(history);
+    expect(history.present).toBe(expanded);
+
+    const alternate = { ...expanded, name: 'Alternate' };
+    history = pushWorkflowHistory(history, alternate);
+    expect(history.future).toEqual([]);
+    expect(pushWorkflowHistory(history, history.present)).toBe(history);
+    expect(initial.name).toBe('Untitled workflow');
+  });
+
   it('keeps transient drag position while workflow data and status update', () => {
     const workflow = createWorkflow();
     const initial = reconcileProcessNodes(workflow, [], () => 'idle');
@@ -81,6 +237,23 @@ describe('desktop workflow editing', () => {
         block: { name: 'Renamed while dragging' },
       },
     });
+  });
+
+  it('projects explicit AI Agent editor identity without executable inference', () => {
+    const workflow = setAgentBlockPresentation(
+      createWorkflow(),
+      'welcome',
+      'codex',
+    );
+
+    expect(reconcileProcessNodes(workflow, [], () => 'idle')[0]?.data).toEqual(
+      expect.objectContaining({
+        agentRuntime: 'codex',
+        block: expect.objectContaining({
+          invocation: expect.objectContaining({ executable: 'printf' }),
+        }),
+      }),
+    );
   });
 
   it('persists a final drag position without disturbing other layout entries', () => {
@@ -207,3 +380,66 @@ describe('desktop workflow editing', () => {
     );
   });
 });
+
+function configuredBlock(): ProcessBlock {
+  return {
+    id: 'source',
+    name: 'Configured process',
+    kind: 'process',
+    inputs: [
+      {
+        id: 'prompt',
+        name: 'Prompt',
+        artifactKind: 'text',
+        required: false,
+      },
+      {
+        id: 'context',
+        name: 'Context',
+        artifactKind: 'text',
+        required: false,
+      },
+    ],
+    outputs: [
+      { id: 'stdout', name: 'Response', artifactKind: 'text' },
+      { id: 'report', name: 'Report', artifactKind: 'filesystem-reference' },
+    ],
+    invocation: {
+      executable: 'tool',
+      arguments: [
+        { type: 'literal', value: '--mode' },
+        { type: 'input', portId: 'context' },
+        { type: 'literal', value: 'safe' },
+      ],
+      workingDirectory: '/workspace',
+      environment: {
+        PATH: { source: 'host', name: 'PATH' },
+        MODE: { source: 'literal', value: 'test' },
+      },
+      stdin: { portId: 'prompt' },
+      shell: false,
+      outputs: [
+        { type: 'stdout', portId: 'stdout' },
+        {
+          type: 'filesystem',
+          portId: 'report',
+          path: './report.txt',
+          entity: 'file',
+        },
+      ],
+    },
+  };
+}
+
+function connection(
+  id: string,
+  fromBlockId: string,
+  toBlockId: string,
+  toPortId: string,
+): WorkflowDefinition['connections'][number] {
+  return {
+    id,
+    from: { blockId: fromBlockId, portId: 'stdout' },
+    to: { blockId: toBlockId, portId: toPortId },
+  };
+}

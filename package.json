@@ -1,6 +1,6 @@
 {
   "name": "vorchestra",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A visual operating system for local automation.",
   "engines": {
@@ -13,12 +13,19 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "desktop:smoke": "npm run build && node scripts/run-electron-smoke.mjs",
+    "desktop:smoke:packaged": "npm run package:mac:dir && node scripts/run-electron-smoke.mjs --packaged",
+    "desktop:performance:packaged": "npm run package:mac:dir && node scripts/run-electron-smoke.mjs --packaged --performance",
     "dev": "npm run dev --workspace @vorchestra/desktop",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "verify": "npm run format:check && npm run typecheck && npm test",
+    "package:mac:dir": "npm run build && npm run package:mac:dir --workspace @vorchestra/desktop",
+    "package:mac:unsigned": "npm run build && npm run package:mac:unsigned --workspace @vorchestra/desktop",
+    "release:mac": "npm run build && npm run release:mac --workspace @vorchestra/desktop",
+    "verify:mac:release": "npm run verify:mac:release --workspace @vorchestra/desktop",
+    "verify:mac:unsigned": "npm run verify:mac:unsigned --workspace @vorchestra/desktop",
     "workflow:check": "npm run build --workspace @vorchestra/engine && node scripts/check-workflow.mjs",
     "workflow:run": "npm run build --workspace @vorchestra/engine && npm run build --workspace @vorchestra/node-runner && node scripts/run-workflow.mjs"
   },

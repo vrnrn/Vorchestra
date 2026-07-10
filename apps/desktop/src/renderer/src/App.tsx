@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type DragEvent as ReactDragEvent,
@@ -21,68 +22,135 @@ import {
   type OnNodeDrag,
 } from '@xyflow/react';
 import {
+  parseWorkflowRunInputs,
   validateWorkflow,
   type Artifact,
   type ArtifactKind,
+  type BlockPreflightPreview,
   type BlockExecutionState,
+  type ExecutionFailure,
   type ProcessBlock,
+  type WorkflowPreflightResult,
+  type WorkflowRunInputs,
   type WorkflowDefinition,
 } from '@vorchestra/engine';
 import {
   AlertTriangle,
+  Bot,
   Braces,
   Check,
   ChevronRight,
   CircleStop,
+  ClipboardPaste,
   Clock3,
+  Copy,
   FileCode2,
   FileInput,
+  Files,
   FolderOpen,
   GitBranch,
   GripVertical,
+  History,
   Info,
   Layers3,
   LoaderCircle,
+  Network,
   PanelRightClose,
   Play,
   Plus,
+  Redo2,
   Save,
   SaveAll,
   ShieldAlert,
   TerminalSquare,
   Trash2,
+  Undo2,
   X,
   XCircle,
 } from 'lucide-react';
-import type { BlockRunSnapshot, DesktopRunEvent } from '../../shared/contracts';
+import type {
+  BlockRunSnapshot,
+  DesktopRunEvent,
+  RunHistoryRecord,
+} from '../../shared/contracts';
+import {
+  compileAgentBlock,
+  getAgentBlockPresentation,
+  removeBlockPresentation,
+  setAgentBlockPresentation,
+  type AgentBlockPresentation,
+} from '../../shared/agent-runtime';
 import { createProcessBlock, createWorkflow } from '../../shared/defaults';
+import { AgentBlockInspector } from './AgentBlockInspector';
+import {
+  clearWorkflowDraft,
+  readWorkflowDraft,
+  writeWorkflowDraft,
+} from './draft-store';
 import { ProcessNode, type ProcessFlowNode } from './ProcessNode';
+import { InvocationPreview } from './InvocationPreview';
+import { PreflightPanel } from './PreflightPanel';
+import { RunHistoryPanel } from './RunHistoryPanel';
+import { RunInputFields, WorkflowInputsEditor } from './WorkflowInputs';
+import {
+  buildWorkflowRunInputs,
+  serializeRunInputValue,
+} from './workflow-inputs';
 import {
   addInputPort,
   addOutputPort,
+  autoArrangeWorkflow,
   connectBlocks,
+  copyProcessBlock,
+  createWorkflowHistory,
+  duplicateProcessBlock,
   moveListItem,
   moveRecordEntry,
+  pasteProcessBlock,
   removeBlock,
   removeInputPort,
   removeOutputPort,
   reconcileProcessNodes,
+  redoWorkflowHistory,
   replaceBlock,
   setBlockPosition,
+  pushWorkflowHistory,
+  undoWorkflowHistory,
+  type ProcessBlockClipboard,
+  type WorkflowHistory,
 } from './workflow';
 
 const nodeTypes = { process: ProcessNode };
 type InspectorTab = 'configure' | 'run';
 type ReorderGroup = 'arguments' | 'inputs' | 'outputs' | 'environment';
 type ReorderLocation = { group: ReorderGroup; index: number };
+type InspectorFocusRequest = {
+  readonly blockId: string;
+  readonly field: string;
+  readonly nonce: number;
+};
 
 export function App() {
-  const [workflow, setWorkflow] = useState<WorkflowDefinition>(createWorkflow);
+  const [recoveredDraft] = useState(readWorkflowDraft);
+  const [history, setHistory] = useState<WorkflowHistory>(() =>
+    createWorkflowHistory(recoveredDraft?.workflow ?? createWorkflow()),
+  );
+  const workflow = history.present;
   const [nodes, setNodes] = useState<ProcessFlowNode[]>([]);
   const [canvasRevision, setCanvasRevision] = useState(0);
-  const [filePath, setFilePath] = useState<string>();
-  const [dirty, setDirty] = useState(false);
-  const [selectedBlockId, setSelectedBlockId] = useState<string>('welcome');
+  const [filePath, setFilePath] = useState<string | undefined>(
+    recoveredDraft?.filePath,
+  );
+  const [dirty, setDirty] = useState(recoveredDraft !== undefined);
+  const [historyBaselineDirty, setHistoryBaselineDirty] = useState(
+    recoveredDraft !== undefined,
+  );
+  const [selectedBlockId, setSelectedBlockId] = useState<string>(
+    workflow.blocks[0]?.id ?? '',
+  );
+  const [blockClipboard, setBlockClipboard] = useState<ProcessBlockClipboard>();
+  const [blockClipboardPresentation, setBlockClipboardPresentation] =
+    useState<AgentBlockPresentation>();
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('configure');
   const [snapshots, setSnapshots] = useState<
     Readonly<Record<string, BlockRunSnapshot>>
@@ -93,17 +161,62 @@ export function App() {
   >();
   const [runPreviewOpen, setRunPreviewOpen] = useState(false);
   const [trustConfirmed, setTrustConfirmed] = useState(false);
-  const [notice, setNotice] = useState<string>();
+  const [runInputValues, setRunInputValues] = useState<
+    Readonly<Record<string, string>>
+  >({});
+  const [preflight, setPreflight] = useState<WorkflowPreflightResult>();
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [runHistory, setRunHistory] = useState<readonly RunHistoryRecord[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string>();
+  const [inspectorFocusRequest, setInspectorFocusRequest] =
+    useState<InspectorFocusRequest>();
+  const [notice, setNotice] = useState<string | undefined>(
+    recoveredDraft === undefined ? undefined : 'Recovered unsaved draft.',
+  );
 
   const validation = useMemo(() => validateWorkflow(workflow), [workflow]);
   const selectedBlock = workflow.blocks.find(
     (block) => block.id === selectedBlockId,
   );
+  const selectedPresentation =
+    selectedBlock === undefined
+      ? undefined
+      : getAgentBlockPresentation(workflow, selectedBlock.id);
+  const runInputBuild = useMemo(
+    () => buildWorkflowRunInputs(workflow, runInputValues),
+    [runInputValues, workflow],
+  );
   const isRunning = activeRunId !== undefined && runOutcome === undefined;
+  const canUndo = history.past.length > 0;
+  const canRedo = history.future.length > 0;
+
+  const selectFilesystemPath = useCallback(
+    async (
+      kind: 'file' | 'directory' | 'output-file',
+      defaultPath?: string,
+    ): Promise<string | undefined> => {
+      const result = await window.vorchestra.selectFilesystemPath({
+        kind,
+        ...(defaultPath === undefined ? {} : { defaultPath }),
+      });
+      return result.canceled ? undefined : result.path;
+    },
+    [],
+  );
+
+  const refreshRunHistory = useCallback(async (): Promise<void> => {
+    try {
+      setRunHistory(await window.vorchestra.listRunHistory(workflow.id));
+    } catch (error) {
+      setNotice(`Could not load run history: ${errorMessage(error)}`);
+    }
+  }, [workflow.id]);
 
   const changeWorkflow = useCallback(
     (update: (current: WorkflowDefinition) => WorkflowDefinition) => {
-      setWorkflow((current) => update(current));
+      setHistory((current) =>
+        pushWorkflowHistory(current, update(current.present)),
+      );
       setDirty(true);
       setNotice(undefined);
     },
@@ -112,9 +225,98 @@ export function App() {
 
   const resetCanvasWorkflow = useCallback((next: WorkflowDefinition): void => {
     setNodes(reconcileProcessNodes(next, [], () => 'idle'));
-    setWorkflow(next);
+    setHistory(createWorkflowHistory(next));
     setCanvasRevision((revision) => revision + 1);
   }, []);
+
+  const restoreHistory = useCallback(
+    (next: WorkflowHistory): void => {
+      setHistory(next);
+      setNodes(
+        reconcileProcessNodes(
+          next.present,
+          [],
+          (blockId) => snapshots[blockId]?.state ?? 'idle',
+        ),
+      );
+      setCanvasRevision((revision) => revision + 1);
+      setDirty(historyBaselineDirty || next.past.length > 0);
+      setNotice(undefined);
+    },
+    [historyBaselineDirty, snapshots],
+  );
+
+  const undo = useCallback((): void => {
+    const next = undoWorkflowHistory(history);
+    if (next !== history) restoreHistory(next);
+  }, [history, restoreHistory]);
+
+  const redo = useCallback((): void => {
+    const next = redoWorkflowHistory(history);
+    if (next !== history) restoreHistory(next);
+  }, [history, restoreHistory]);
+
+  const copySelectedBlock = useCallback((): void => {
+    const copied = copyProcessBlock(workflow, selectedBlockId);
+    if (copied === undefined) return;
+    setBlockClipboard(copied);
+    setBlockClipboardPresentation(
+      getAgentBlockPresentation(workflow, selectedBlockId),
+    );
+    setNotice(`Copied ${copied.block.name}.`);
+  }, [selectedBlockId, workflow]);
+
+  const pasteCopiedBlock = useCallback((): void => {
+    if (blockClipboard === undefined) return;
+    const pasted = pasteProcessBlock(workflow, blockClipboard);
+    const nextWorkflow =
+      blockClipboardPresentation === undefined
+        ? pasted.workflow
+        : setAgentBlockPresentation(
+            pasted.workflow,
+            pasted.blockId,
+            blockClipboardPresentation.agentRuntime,
+          );
+    setHistory(pushWorkflowHistory(history, nextWorkflow));
+    setSelectedBlockId(pasted.blockId);
+    setInspectorTab('configure');
+    setDirty(true);
+    setNotice(`Pasted ${blockClipboard.block.name}.`);
+  }, [blockClipboard, blockClipboardPresentation, history, workflow]);
+
+  const duplicateSelectedBlock = useCallback((): void => {
+    const duplicated = duplicateProcessBlock(workflow, selectedBlockId);
+    if (duplicated === undefined) return;
+    const presentation = getAgentBlockPresentation(workflow, selectedBlockId);
+    const nextWorkflow =
+      presentation === undefined
+        ? duplicated.workflow
+        : setAgentBlockPresentation(
+            duplicated.workflow,
+            duplicated.blockId,
+            presentation.agentRuntime,
+          );
+    setHistory(pushWorkflowHistory(history, nextWorkflow));
+    setSelectedBlockId(duplicated.blockId);
+    setInspectorTab('configure');
+    setDirty(true);
+    setNotice('Block duplicated.');
+  }, [history, selectedBlockId, workflow]);
+
+  const autoArrange = useCallback((): void => {
+    const arranged = autoArrangeWorkflow(workflow);
+    setHistory(pushWorkflowHistory(history, arranged));
+    setNodes(
+      reconcileProcessNodes(
+        arranged,
+        [],
+        (blockId) => snapshots[blockId]?.state ?? 'idle',
+      ),
+    );
+    setCanvasRevision((revision) => revision + 1);
+    setDirty(true);
+    setNotice('Workflow arranged.');
+  }, [history, snapshots, workflow]);
 
   useEffect(() => {
     return window.vorchestra.onRunEvent((event: DesktopRunEvent) => {
@@ -140,25 +342,126 @@ export function App() {
             ? `Run ${event.outcome}.`
             : `${event.error.message} ${event.error.nextAction}`,
         );
+        void refreshRunHistory();
       }
     });
-  }, []);
+  }, [refreshRunHistory]);
+
+  useEffect(() => {
+    void refreshRunHistory();
+  }, [refreshRunHistory]);
+
+  useEffect(() => {
+    let active = true;
+    setPreflightLoading(true);
+    void window.vorchestra
+      .preflightWorkflow({
+        workflow,
+        runInputs: runInputBuild.inputs,
+        ...(filePath === undefined ? {} : { workflowFilePath: filePath }),
+      })
+      .then((result) => {
+        if (active) setPreflight(result);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setPreflight(undefined);
+          setNotice(`Preflight failed: ${errorMessage(error)}`);
+        }
+      })
+      .finally(() => {
+        if (active) setPreflightLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [filePath, runInputBuild.inputs, workflow]);
+
+  useEffect(() => {
+    if (dirty) {
+      writeWorkflowDraft({
+        workflow,
+        ...(filePath === undefined ? {} : { filePath }),
+      });
+    } else {
+      clearWorkflowDraft();
+    }
+  }, [dirty, filePath, workflow]);
+
+  useEffect(() => {
+    if (
+      selectedBlockId !== '' &&
+      !workflow.blocks.some((block) => block.id === selectedBlockId)
+    ) {
+      setSelectedBlockId(workflow.blocks[0]?.id ?? '');
+    }
+  }, [selectedBlockId, workflow.blocks]);
+
+  useEffect(() => {
+    if (
+      inspectorFocusRequest === undefined ||
+      inspectorTab !== 'configure' ||
+      selectedBlockId !== inspectorFocusRequest.blockId
+    ) {
+      return;
+    }
+    const animationFrame = requestAnimationFrame(() => {
+      const fields = document
+        .querySelector<HTMLElement>('.inspector')
+        ?.querySelectorAll<HTMLElement>('[data-inspector-field]');
+      const target =
+        fields === undefined
+          ? undefined
+          : [...fields].find((candidate) =>
+              inspectorFieldMatches(
+                candidate.dataset.inspectorField,
+                inspectorFocusRequest.field,
+              ),
+            );
+      target?.focus();
+      target?.scrollIntoView?.({ block: 'center' });
+      setInspectorFocusRequest(undefined);
+    });
+    return () => cancelAnimationFrame(animationFrame);
+  }, [inspectorFocusRequest, inspectorTab, selectedBlockId]);
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent): void => {
       if (!(event.metaKey || event.ctrlKey)) return;
-      if (event.key.toLowerCase() === 's') {
+      const key = event.key.toLowerCase();
+      if (key === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (key === 's') {
         event.preventDefault();
         void saveWorkflow(event.shiftKey);
+        return;
       }
-      if (event.key.toLowerCase() === 'o') {
+      if (key === 'o') {
         event.preventDefault();
         void openWorkflow();
+        return;
+      }
+      if (isEditableTarget(event.target)) return;
+      if (key === 'c') {
+        event.preventDefault();
+        copySelectedBlock();
+      }
+      if (key === 'v') {
+        event.preventDefault();
+        pasteCopiedBlock();
+      }
+      if (key === 'd') {
+        event.preventDefault();
+        duplicateSelectedBlock();
       }
     };
     window.addEventListener('keydown', keyDown);
     return () => window.removeEventListener('keydown', keyDown);
-  });
+  }, [copySelectedBlock, duplicateSelectedBlock, pasteCopiedBlock, redo, undo]);
 
   useEffect(() => {
     setNodes((current) =>
@@ -198,7 +501,7 @@ export function App() {
       );
       if (removedIds.size > 0) {
         changeWorkflow((current) =>
-          [...removedIds].reduce(removeBlock, current),
+          [...removedIds].reduce(removeEditorBlock, current),
         );
         if (removedIds.has(selectedBlockId)) setSelectedBlockId('');
       }
@@ -283,6 +586,40 @@ export function App() {
     setInspectorTab('configure');
   };
 
+  const addAgentBlock = (): void => {
+    const block = compileAgentBlock({
+      id: crypto.randomUUID(),
+      name: 'AI Agent',
+      agentRuntime: 'codex',
+      instruction: 'Complete the requested task and return a concise response.',
+      authority: 'read-only',
+      textContext: { portId: 'context', name: 'Context' },
+      textResponse: { portId: 'response', name: 'Response' },
+      filesystemOutputs: [],
+    });
+    changeWorkflow((current) =>
+      setAgentBlockPresentation(
+        {
+          ...current,
+          blocks: [...current.blocks, block],
+          layout: {
+            blockPositions: {
+              ...(current.layout?.blockPositions ?? {}),
+              [block.id]: {
+                x: 180 + (current.blocks.length % 3) * 300,
+                y: 160 + Math.floor(current.blocks.length / 3) * 220,
+              },
+            },
+          },
+        },
+        block.id,
+        'codex',
+      ),
+    );
+    setSelectedBlockId(block.id);
+    setInspectorTab('configure');
+  };
+
   async function saveWorkflow(saveAs = false): Promise<void> {
     try {
       const result = await window.vorchestra.saveWorkflow({
@@ -292,7 +629,10 @@ export function App() {
       });
       if (!result.canceled) {
         setFilePath(result.filePath);
+        setHistory(createWorkflowHistory(workflow));
+        setHistoryBaselineDirty(false);
         setDirty(false);
+        clearWorkflowDraft();
         setNotice('Workflow saved.');
       }
     } catch (error) {
@@ -312,10 +652,16 @@ export function App() {
       if (result.canceled || result.workflow === undefined) return;
       resetCanvasWorkflow(result.workflow);
       setFilePath(result.filePath);
+      setHistoryBaselineDirty(false);
       setDirty(false);
+      clearWorkflowDraft();
       setSnapshots({});
       setRunOutcome(undefined);
       setActiveRunId(undefined);
+      setBlockClipboard(undefined);
+      setBlockClipboardPresentation(undefined);
+      setRunInputValues({});
+      setSelectedRunId(undefined);
       setSelectedBlockId(result.workflow.blocks[0]?.id ?? '');
       setNotice('Workflow opened.');
     } catch (error) {
@@ -333,20 +679,37 @@ export function App() {
     const next = createWorkflow();
     resetCanvasWorkflow(next);
     setFilePath(undefined);
+    setHistoryBaselineDirty(false);
     setDirty(false);
+    clearWorkflowDraft();
     setSnapshots({});
     setRunOutcome(undefined);
     setActiveRunId(undefined);
+    setBlockClipboard(undefined);
+    setBlockClipboardPresentation(undefined);
+    setRunInputValues({});
+    setSelectedRunId(undefined);
     setSelectedBlockId(next.blocks[0]?.id ?? '');
     setNotice('New workflow created.');
   }
 
   async function startRun(): Promise<void> {
-    if (!validation.valid || !trustConfirmed) return;
+    if (
+      !validation.valid ||
+      !runInputBuild.valid ||
+      preflight?.ready !== true ||
+      !trustConfirmed
+    )
+      return;
     try {
       setSnapshots({});
       setRunOutcome(undefined);
-      const result = await window.vorchestra.runWorkflow(workflow);
+      setSelectedRunId(undefined);
+      const result = await window.vorchestra.runWorkflow({
+        workflow,
+        runInputs: runInputBuild.inputs,
+        ...(filePath === undefined ? {} : { workflowFilePath: filePath }),
+      });
       setActiveRunId(result.runId);
       setRunPreviewOpen(false);
       setTrustConfirmed(false);
@@ -361,6 +724,23 @@ export function App() {
       await window.vorchestra.cancelRun(activeRunId);
   }
 
+  async function copyToClipboard(value: string, label: string): Promise<void> {
+    try {
+      if (navigator.clipboard === undefined) {
+        throw new Error('Clipboard access is unavailable.');
+      }
+      await navigator.clipboard.writeText(value);
+      setNotice(`${label} copied.`);
+    } catch (error) {
+      setNotice(`Could not copy ${label}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function revealArtifact(path: string): Promise<void> {
+    await window.vorchestra.revealFilesystemPath(path);
+    setNotice('Revealed filesystem reference in Finder.');
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -369,7 +749,7 @@ export function App() {
             <Layers3 size={18} />
           </div>
           <span>VORCHESTRA</span>
-          <em>v0.1</em>
+          <em>v0.2</em>
         </div>
         <div className="document-title">
           <input
@@ -409,6 +789,49 @@ export function App() {
             onClick={() => void saveWorkflow(true)}
           />
           <span className="toolbar-separator" />
+          <ToolbarButton
+            icon={<Undo2 size={15} />}
+            label="Undo"
+            title="Undo (Cmd/Ctrl-Z)"
+            disabled={!canUndo}
+            onClick={undo}
+          />
+          <ToolbarButton
+            icon={<Redo2 size={15} />}
+            label="Redo"
+            title="Redo (Cmd/Ctrl-Shift-Z)"
+            disabled={!canRedo}
+            onClick={redo}
+          />
+          <ToolbarButton
+            icon={<Copy size={15} />}
+            label="Copy block"
+            title="Copy selected block (Cmd/Ctrl-C)"
+            disabled={selectedBlock === undefined}
+            onClick={copySelectedBlock}
+          />
+          <ToolbarButton
+            icon={<ClipboardPaste size={15} />}
+            label="Paste block"
+            title="Paste copied block (Cmd/Ctrl-V)"
+            disabled={blockClipboard === undefined}
+            onClick={pasteCopiedBlock}
+          />
+          <ToolbarButton
+            icon={<Files size={15} />}
+            label="Duplicate block"
+            title="Duplicate selected block (Cmd/Ctrl-D)"
+            disabled={selectedBlock === undefined}
+            onClick={duplicateSelectedBlock}
+          />
+          <ToolbarButton
+            icon={<Network size={15} />}
+            label="Auto arrange"
+            title="Arrange workflow by dependency layer"
+            disabled={workflow.blocks.length === 0}
+            onClick={autoArrange}
+          />
+          <span className="toolbar-separator" />
           {isRunning ? (
             <button className="button danger" onClick={() => void cancelRun()}>
               <CircleStop size={15} /> Cancel
@@ -432,13 +855,31 @@ export function App() {
 
       <section className="workspace">
         <aside className="rail">
-          <button className="add-process" onClick={addBlock}>
+          <button
+            className="add-process"
+            aria-label="Add process"
+            onClick={addBlock}
+          >
             <span>
               <TerminalSquare size={17} />
             </span>
             <span>
               <strong>Process</strong>
               <small>Generic local command</small>
+            </span>
+            <Plus size={15} />
+          </button>
+          <button
+            className="add-process add-agent"
+            aria-label="Add AI Agent"
+            onClick={addAgentBlock}
+          >
+            <span>
+              <Bot size={17} />
+            </span>
+            <span>
+              <strong>AI Agent</strong>
+              <small>Codex Agent runtime</small>
             </span>
             <Plus size={15} />
           </button>
@@ -485,6 +926,46 @@ export function App() {
               ))}
             </div>
           )}
+          <WorkflowInputsEditor
+            workflow={workflow}
+            onChange={(next) => changeWorkflow(() => next)}
+            selectPath={selectFilesystemPath}
+          />
+          <RunHistoryPanel
+            records={runHistory}
+            {...(selectedRunId === undefined ? {} : { selectedRunId })}
+            onSelect={(record) => {
+              setSnapshots(
+                Object.fromEntries(
+                  record.blocks.map((block) => [block.blockId, block]),
+                ),
+              );
+              setActiveRunId(record.runId);
+              setRunOutcome(record.outcome);
+              setSelectedRunId(record.runId);
+              setRunInputValues(serializedHistoryInputs(record.runInputs));
+              const focusBlock =
+                record.blocks.find((block) => block.state === 'failed') ??
+                record.blocks[0];
+              if (focusBlock !== undefined) {
+                setSelectedBlockId(focusBlock.blockId);
+                setInspectorTab('run');
+              }
+              setNotice(`Viewing retained run ${record.runId}.`);
+            }}
+            onClear={() => {
+              void window.vorchestra
+                .clearRunHistory(workflow.id)
+                .then(() => {
+                  setRunHistory([]);
+                  setSelectedRunId(undefined);
+                  setNotice('Run history cleared.');
+                })
+                .catch((error: unknown) =>
+                  setNotice(`Could not clear history: ${errorMessage(error)}`),
+                );
+            }}
+          />
           <div className="rail-footer">
             <ShieldAlert size={14} />
             <span>Commands run with your local user permissions.</span>
@@ -563,15 +1044,20 @@ export function App() {
             <>
               <div className="inspector-header">
                 <div>
-                  <small>PROCESS BLOCK</small>
+                  <small>
+                    {selectedPresentation === undefined
+                      ? 'PROCESS BLOCK'
+                      : 'AI AGENT BLOCK'}
+                  </small>
                   <strong>{selectedBlock.name}</strong>
                 </div>
                 <button
                   className="icon-button destructive"
                   title="Delete block"
+                  aria-label="Delete block"
                   onClick={() => {
                     changeWorkflow((current) =>
-                      removeBlock(current, selectedBlock.id),
+                      removeEditorBlock(current, selectedBlock.id),
                     );
                     setSelectedBlockId('');
                   }}
@@ -579,16 +1065,36 @@ export function App() {
                   <Trash2 size={15} />
                 </button>
               </div>
-              <div className="tab-list">
+              <div className="tab-list" role="tablist">
                 <button
+                  id="inspector-configure-tab"
+                  role="tab"
+                  aria-selected={inspectorTab === 'configure'}
+                  aria-controls="inspector-configure-panel"
+                  tabIndex={inspectorTab === 'configure' ? 0 : -1}
                   className={inspectorTab === 'configure' ? 'active' : ''}
                   onClick={() => setInspectorTab('configure')}
+                  onKeyDown={(event) =>
+                    handleInspectorTabKeyDown(
+                      event,
+                      'configure',
+                      setInspectorTab,
+                    )
+                  }
                 >
                   Configure
                 </button>
                 <button
+                  id="inspector-run-tab"
+                  role="tab"
+                  aria-selected={inspectorTab === 'run'}
+                  aria-controls="inspector-run-panel"
+                  tabIndex={inspectorTab === 'run' ? 0 : -1}
                   className={inspectorTab === 'run' ? 'active' : ''}
                   onClick={() => setInspectorTab('run')}
+                  onKeyDown={(event) =>
+                    handleInspectorTabKeyDown(event, 'run', setInspectorTab)
+                  }
                 >
                   Run details
                   {snapshots[selectedBlock.id] && (
@@ -598,25 +1104,74 @@ export function App() {
                   )}
                 </button>
               </div>
-              {inspectorTab === 'configure' ? (
-                <BlockInspector
-                  block={selectedBlock}
-                  workflow={workflow}
-                  onChange={(block) =>
-                    changeWorkflow((current) => replaceBlock(current, block))
-                  }
-                  onWorkflowChange={(next) => {
-                    setWorkflow(next);
-                    setDirty(true);
-                  }}
-                />
-              ) : (
-                <RunInspector
-                  {...(snapshots[selectedBlock.id] === undefined
-                    ? {}
-                    : { snapshot: snapshots[selectedBlock.id] })}
-                />
-              )}
+              <div
+                id={
+                  inspectorTab === 'configure'
+                    ? 'inspector-configure-panel'
+                    : 'inspector-run-panel'
+                }
+                className="inspector-tab-panel"
+                role="tabpanel"
+                aria-labelledby={
+                  inspectorTab === 'configure'
+                    ? 'inspector-configure-tab'
+                    : 'inspector-run-tab'
+                }
+              >
+                {inspectorTab === 'configure' ? (
+                  selectedPresentation === undefined ? (
+                    <BlockInspector
+                      block={selectedBlock}
+                      workflow={workflow}
+                      {...(preflight?.blocks.find(
+                        (block) => block.blockId === selectedBlock.id,
+                      ) === undefined
+                        ? {}
+                        : {
+                            resolved: preflight.blocks.find(
+                              (block) => block.blockId === selectedBlock.id,
+                            )!,
+                          })}
+                      selectPath={selectFilesystemPath}
+                      onChange={(block) =>
+                        changeWorkflow((current) =>
+                          replaceBlock(current, block),
+                        )
+                      }
+                      onWorkflowChange={(next) => changeWorkflow(() => next)}
+                    />
+                  ) : (
+                    <AgentBlockInspector
+                      block={selectedBlock}
+                      presentation={selectedPresentation}
+                      selectPath={selectFilesystemPath}
+                      onChange={(block) =>
+                        changeWorkflow((current) =>
+                          replaceBlock(current, block),
+                        )
+                      }
+                    />
+                  )
+                ) : (
+                  <RunInspector
+                    {...(snapshots[selectedBlock.id] === undefined
+                      ? {}
+                      : { snapshot: snapshots[selectedBlock.id] })}
+                    onCopy={(value, label) =>
+                      void copyToClipboard(value, label)
+                    }
+                    onReveal={(path) => void revealArtifact(path)}
+                    onNavigateFailure={(failure) => {
+                      const field = runtimeFailureInspectorField(
+                        failure.code,
+                        selectedPresentation !== undefined,
+                      );
+                      navigateToInspectorField(selectedBlock.id, field);
+                      setNotice(`Review ${field} for ${failure.code}.`);
+                    }}
+                  />
+                )}
+              </div>
             </>
           )}
         </aside>
@@ -637,7 +1192,11 @@ export function App() {
               ? `Last run: ${runOutcome}`
               : 'Idle'}
         </span>
-        {notice && <span className="notice">{notice}</span>}
+        {notice && (
+          <span className="notice" role="status" aria-live="polite">
+            {notice}
+          </span>
+        )}
         <span className="status-spacer" />
         <span>Schema v{workflow.schemaVersion}</span>
         <span>Local execution</span>
@@ -646,7 +1205,39 @@ export function App() {
       {runPreviewOpen && (
         <RunPreview
           workflow={workflow}
-          valid={validation.valid}
+          valid={
+            validation.valid && runInputBuild.valid && preflight?.ready === true
+          }
+          inputValues={runInputValues}
+          inputErrors={runInputBuild.errors}
+          onInputChange={(inputId, value) =>
+            setRunInputValues((current) => ({
+              ...current,
+              [inputId]: value,
+            }))
+          }
+          selectPath={selectFilesystemPath}
+          {...(preflight === undefined ? {} : { preflight })}
+          preflightLoading={preflightLoading}
+          onSelectIssue={(blockId, field) => {
+            if (blockId === undefined && field.startsWith('runInputs.')) {
+              const inputId = field.slice('runInputs.'.length);
+              requestAnimationFrame(() => {
+                const field = [
+                  ...document.querySelectorAll<HTMLElement>(
+                    '[data-run-input-id]',
+                  ),
+                ].find((candidate) => candidate.dataset.runInputId === inputId);
+                field?.focus();
+              });
+              setNotice(`Provide run input ${inputId}.`);
+              return;
+            }
+            if (blockId !== undefined) navigateToInspectorField(blockId, field);
+            setRunPreviewOpen(false);
+            setTrustConfirmed(false);
+            setNotice(`Review ${field}.`);
+          }}
           trustConfirmed={trustConfirmed}
           onTrustChange={setTrustConfirmed}
           onClose={() => {
@@ -660,21 +1251,93 @@ export function App() {
   );
 
   function selectIssueBlock(path: string): void {
-    const match = /blocks\[(\d+)\]/.exec(path);
-    const index = match?.[1] === undefined ? undefined : Number(match[1]);
+    const blockMatch = /blocks\[(\d+)\](?:\.(.*))?/.exec(path);
+    const index =
+      blockMatch?.[1] === undefined ? undefined : Number(blockMatch[1]);
     const block = index === undefined ? undefined : workflow.blocks[index];
-    if (block !== undefined) setSelectedBlockId(block.id);
+    if (block !== undefined) {
+      navigateToInspectorField(block.id, blockMatch?.[2] ?? 'block');
+      return;
+    }
+    const connectionMatch = /connections\[(\d+)\]/.exec(path);
+    const connectionIndex =
+      connectionMatch?.[1] === undefined
+        ? undefined
+        : Number(connectionMatch[1]);
+    const connection =
+      connectionIndex === undefined
+        ? undefined
+        : workflow.connections[connectionIndex];
+    if (connection !== undefined) {
+      navigateToInspectorField(connection.to.blockId, 'inputs');
+    }
   }
+
+  function navigateToInspectorField(blockId: string, field: string): void {
+    setSelectedBlockId(blockId);
+    setInspectorTab('configure');
+    setInspectorFocusRequest({ blockId, field, nonce: Date.now() });
+  }
+}
+
+function inspectorFieldMatches(
+  candidate: string | undefined,
+  requested: string,
+): boolean {
+  if (candidate === undefined) return false;
+  const normalizedRequested = requested.replace(/^blocks\[\d+]\./, '');
+  if (candidate === normalizedRequested) return true;
+  if (
+    candidate.startsWith(`${normalizedRequested}.`) ||
+    normalizedRequested.startsWith(`${candidate}.`)
+  ) {
+    return true;
+  }
+  if (/^invocation\.arguments(?:\[\d+])?/.test(normalizedRequested)) {
+    return candidate.startsWith('invocation.arguments');
+  }
+  if (/^invocation\.outputs(?:\[\d+])?/.test(normalizedRequested)) {
+    return candidate.startsWith('invocation.outputs');
+  }
+  return false;
+}
+
+function handleInspectorTabKeyDown(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  current: InspectorTab,
+  onChange: (tab: InspectorTab) => void,
+): void {
+  let next: InspectorTab | undefined;
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    next = current === 'configure' ? 'run' : 'configure';
+  } else if (event.key === 'Home') {
+    next = 'configure';
+  } else if (event.key === 'End') {
+    next = 'run';
+  }
+  if (next === undefined) return;
+  event.preventDefault();
+  onChange(next);
+  const tabId =
+    next === 'configure' ? 'inspector-configure-tab' : 'inspector-run-tab';
+  requestAnimationFrame(() => document.getElementById(tabId)?.focus());
 }
 
 function BlockInspector({
   block,
   workflow,
+  resolved,
+  selectPath,
   onChange,
   onWorkflowChange,
 }: {
   block: ProcessBlock;
   workflow: WorkflowDefinition;
+  resolved?: BlockPreflightPreview;
+  selectPath: (
+    kind: 'file' | 'directory' | 'output-file',
+    defaultPath?: string,
+  ) => Promise<string | undefined>;
   onChange: (block: ProcessBlock) => void;
   onWorkflowChange: (workflow: WorkflowDefinition) => void;
 }) {
@@ -748,6 +1411,7 @@ function BlockInspector({
       <InspectorSection title="Identity">
         <Field label="Display name">
           <input
+            data-inspector-field="identity.name"
             value={block.name}
             onChange={(event) =>
               onChange({ ...block, name: event.target.value })
@@ -762,6 +1426,7 @@ function BlockInspector({
           hint="Resolved using the declared PATH binding"
         >
           <input
+            data-inspector-field="invocation.executable"
             className="mono"
             value={block.invocation.executable}
             onChange={(event) =>
@@ -774,19 +1439,38 @@ function BlockInspector({
           label="Working directory"
           hint="Leave blank to use the application working directory"
         >
-          <input
-            className="mono"
-            value={block.invocation.workingDirectory ?? ''}
-            placeholder="/absolute/path"
-            onChange={(event) =>
-              patchInvocation(
-                event.target.value.trim() === ''
-                  ? { workingDirectory: undefined }
-                  : { workingDirectory: event.target.value },
-              )
-            }
-            spellCheck={false}
-          />
+          <div className="path-field">
+            <input
+              data-inspector-field="invocation.workingDirectory"
+              className="mono"
+              value={block.invocation.workingDirectory ?? ''}
+              placeholder="Workflow file directory"
+              onChange={(event) =>
+                patchInvocation(
+                  event.target.value.trim() === ''
+                    ? { workingDirectory: undefined }
+                    : { workingDirectory: event.target.value },
+                )
+              }
+              spellCheck={false}
+            />
+            <button
+              className="icon-button"
+              aria-label="Choose working directory"
+              onClick={() =>
+                void selectPath(
+                  'directory',
+                  block.invocation.workingDirectory,
+                ).then((path) => {
+                  if (path !== undefined) {
+                    patchInvocation({ workingDirectory: path });
+                  }
+                })
+              }
+            >
+              <FolderOpen size={13} />
+            </button>
+          </div>
         </Field>
         <label className="toggle-row shell-toggle">
           <span>
@@ -794,6 +1478,7 @@ function BlockInspector({
             <small>Enables expansion, pipes, and redirects</small>
           </span>
           <input
+            data-inspector-field="invocation.shell"
             type="checkbox"
             checked={block.invocation.shell}
             onChange={(event) =>
@@ -865,6 +1550,7 @@ function BlockInspector({
                 />
                 <span>{index + 1}</span>
                 <input
+                  data-inspector-field={`invocation.arguments[${index}]`}
                   className="mono"
                   value={argument.value}
                   aria-label={`Argument ${index + 1}`}
@@ -879,6 +1565,7 @@ function BlockInspector({
                 />
                 <button
                   className="icon-button"
+                  aria-label={`Remove argument ${index + 1}`}
                   onClick={() =>
                     patchInvocation({
                       arguments: block.invocation.arguments.filter(
@@ -971,6 +1658,7 @@ function BlockInspector({
               }
             />
             <input
+              data-inspector-field={`inputs[${index}].name`}
               value={port.name}
               aria-label="Input name"
               onChange={(event) =>
@@ -985,6 +1673,7 @@ function BlockInspector({
               }
             />
             <select
+              data-inspector-field={`inputs[${index}].artifactKind`}
               value={port.artifactKind}
               onChange={(event) =>
                 onChange({
@@ -1003,6 +1692,7 @@ function BlockInspector({
               <ArtifactOptions />
             </select>
             <select
+              data-inspector-field={`inputs[${index}].delivery`}
               aria-label="Input delivery"
               value={
                 block.invocation.stdin?.portId === port.id
@@ -1033,6 +1723,7 @@ function BlockInspector({
             </select>
             <button
               className="icon-button"
+              aria-label={`Remove input port ${port.name}`}
               onClick={() =>
                 onWorkflowChange(removeInputPort(workflow, block, port.id))
               }
@@ -1089,6 +1780,7 @@ function BlockInspector({
                 }
               />
               <input
+                data-inspector-field={`outputs[${index}].name`}
                 value={port.name}
                 aria-label="Output name"
                 onChange={(event) =>
@@ -1103,6 +1795,7 @@ function BlockInspector({
                 }
               />
               <select
+                data-inspector-field={`outputs[${index}].artifactKind`}
                 value={port.artifactKind}
                 onChange={(event) => {
                   const artifactKind = event.target.value as ArtifactKind;
@@ -1136,6 +1829,7 @@ function BlockInspector({
               </select>
               <button
                 className="icon-button"
+                aria-label={`Remove output port ${port.name}`}
                 onClick={() =>
                   onWorkflowChange(removeOutputPort(workflow, block, port.id))
                 }
@@ -1146,21 +1840,76 @@ function BlockInspector({
                 <span>Binding</span>
                 <code>{binding?.type ?? 'missing'}</code>
                 {binding?.type === 'filesystem' && (
-                  <input
-                    className="mono"
-                    aria-label="Output path"
-                    value={binding.path}
-                    onChange={(event) =>
-                      patchInvocation({
-                        outputs: block.invocation.outputs.map((candidate) =>
-                          candidate.portId === port.id &&
-                          candidate.type === 'filesystem'
-                            ? { ...candidate, path: event.target.value }
-                            : candidate,
-                        ),
-                      })
-                    }
-                  />
+                  <>
+                    <select
+                      data-inspector-field={`invocation.outputs[${block.invocation.outputs.findIndex((candidate) => candidate.portId === port.id)}].entity`}
+                      aria-label="Output entity"
+                      value={binding.entity ?? 'unknown'}
+                      onChange={(event) =>
+                        patchInvocation({
+                          outputs: block.invocation.outputs.map((candidate) =>
+                            candidate.portId === port.id &&
+                            candidate.type === 'filesystem'
+                              ? {
+                                  ...candidate,
+                                  entity: event.target.value as
+                                    'file' | 'directory' | 'unknown',
+                                }
+                              : candidate,
+                          ),
+                        })
+                      }
+                    >
+                      <option value="file">File</option>
+                      <option value="directory">Directory</option>
+                      <option value="unknown">File or directory</option>
+                    </select>
+                    <div className="path-field">
+                      <input
+                        data-inspector-field={`invocation.outputs[${block.invocation.outputs.findIndex((candidate) => candidate.portId === port.id)}].path`}
+                        className="mono"
+                        aria-label="Output path"
+                        value={binding.path}
+                        onChange={(event) =>
+                          patchInvocation({
+                            outputs: block.invocation.outputs.map(
+                              (candidate) =>
+                                candidate.portId === port.id &&
+                                candidate.type === 'filesystem'
+                                  ? { ...candidate, path: event.target.value }
+                                  : candidate,
+                            ),
+                          })
+                        }
+                      />
+                      <button
+                        className="icon-button"
+                        aria-label={`Choose output path for ${port.name}`}
+                        onClick={() =>
+                          void selectPath(
+                            binding.entity === 'directory'
+                              ? 'directory'
+                              : 'output-file',
+                            binding.path,
+                          ).then((path) => {
+                            if (path !== undefined) {
+                              patchInvocation({
+                                outputs: block.invocation.outputs.map(
+                                  (candidate) =>
+                                    candidate.portId === port.id &&
+                                    candidate.type === 'filesystem'
+                                      ? { ...candidate, path }
+                                      : candidate,
+                                ),
+                              });
+                            }
+                          })
+                        }
+                      >
+                        <FolderOpen size={13} />
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
@@ -1260,6 +2009,12 @@ function BlockInspector({
           are stored in the workflow—do not put secrets there.
         </p>
       </InspectorSection>
+      <InspectorSection title="Invocation preview">
+        <InvocationPreview
+          block={block}
+          {...(resolved === undefined ? {} : { resolved })}
+        />
+      </InspectorSection>
     </div>
   );
 }
@@ -1316,12 +2071,14 @@ function EnvironmentRow({
   return (
     <>
       <input
+        data-inspector-field={`invocation.environment.${name}`}
         className="mono"
         value={name}
         aria-label="Environment variable"
         onChange={(event) => onChange(event.target.value, value)}
       />
       <select
+        aria-label={`Environment source for ${name}`}
         value={source}
         onChange={(event) =>
           onChange(
@@ -1354,14 +2111,28 @@ function EnvironmentRow({
           )
         }
       />
-      <button className="icon-button" onClick={onRemove}>
+      <button
+        className="icon-button"
+        aria-label={`Remove environment variable ${name}`}
+        onClick={onRemove}
+      >
         <Trash2 size={13} />
       </button>
     </>
   );
 }
 
-function RunInspector({ snapshot }: { snapshot?: BlockRunSnapshot }) {
+function RunInspector({
+  snapshot,
+  onCopy,
+  onReveal,
+  onNavigateFailure,
+}: {
+  snapshot?: BlockRunSnapshot;
+  onCopy: (value: string, label: string) => void;
+  onReveal: (path: string) => void;
+  onNavigateFailure: (failure: ExecutionFailure) => void;
+}) {
   if (snapshot === undefined) {
     return (
       <div className="run-empty">
@@ -1399,6 +2170,32 @@ function RunInspector({ snapshot }: { snapshot?: BlockRunSnapshot }) {
               <small>{snapshot.failure.nextAction}</small>
             )}
           </div>
+          <button
+            className="icon-button"
+            aria-label="Copy failure details"
+            onClick={() =>
+              onCopy(
+                [
+                  snapshot.failure!.code,
+                  snapshot.failure!.message,
+                  snapshot.failure!.nextAction ?? '',
+                ]
+                  .filter(Boolean)
+                  .join('\n'),
+                'Failure details',
+              )
+            }
+          >
+            <Copy size={13} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label="Review responsible setting"
+            title="Open the most relevant configuration field"
+            onClick={() => onNavigateFailure(snapshot.failure!)}
+          >
+            <ChevronRight size={13} />
+          </button>
         </div>
       )}
       {snapshot.skipReason && (
@@ -1412,7 +2209,13 @@ function RunInspector({ snapshot }: { snapshot?: BlockRunSnapshot }) {
         count={Object.keys(snapshot.inputs).length}
       >
         {Object.entries(snapshot.inputs).map(([portId, artifact]) => (
-          <ArtifactView key={portId} label={portId} artifact={artifact} />
+          <ArtifactView
+            key={portId}
+            label={portId}
+            artifact={artifact}
+            onCopy={onCopy}
+            onReveal={onReveal}
+          />
         ))}
         {Object.keys(snapshot.inputs).length === 0 && (
           <EmptyLine text="No inputs" />
@@ -1422,16 +2225,44 @@ function RunInspector({ snapshot }: { snapshot?: BlockRunSnapshot }) {
         {snapshot.artifacts.map((artifact) => (
           <ArtifactView
             key={artifact.id}
-            label={artifact.provenance.portId}
+            label={
+              'portId' in artifact.provenance
+                ? artifact.provenance.portId
+                : artifact.provenance.inputId
+            }
             artifact={artifact}
+            onCopy={onCopy}
+            onReveal={onReveal}
           />
         ))}
         {snapshot.artifacts.length === 0 && <EmptyLine text="No artifacts" />}
       </DataSection>
-      <DataSection title="stdout">
+      <DataSection
+        title="stdout"
+        action={
+          <button
+            className="icon-button"
+            aria-label="Copy stdout"
+            onClick={() => onCopy(snapshot.stdout, 'stdout')}
+          >
+            <Copy size={13} />
+          </button>
+        }
+      >
         <pre>{snapshot.stdout || 'No stdout captured.'}</pre>
       </DataSection>
-      <DataSection title="stderr">
+      <DataSection
+        title="stderr"
+        action={
+          <button
+            className="icon-button"
+            aria-label="Copy stderr"
+            onClick={() => onCopy(snapshot.stderr, 'stderr')}
+          >
+            <Copy size={13} />
+          </button>
+        }
+      >
         <pre className={snapshot.stderr ? 'error-output' : ''}>
           {snapshot.stderr || 'No stderr captured.'}
         </pre>
@@ -1455,6 +2286,13 @@ function RunInspector({ snapshot }: { snapshot?: BlockRunSnapshot }) {
 function RunPreview({
   workflow,
   valid,
+  inputValues,
+  inputErrors,
+  onInputChange,
+  selectPath,
+  preflight,
+  preflightLoading,
+  onSelectIssue,
   trustConfirmed,
   onTrustChange,
   onClose,
@@ -1462,11 +2300,63 @@ function RunPreview({
 }: {
   workflow: WorkflowDefinition;
   valid: boolean;
+  inputValues: Readonly<Record<string, string>>;
+  inputErrors: Readonly<Record<string, string>>;
+  onInputChange: (inputId: string, value: string) => void;
+  selectPath: (
+    kind: 'file' | 'directory' | 'output-file',
+    defaultPath?: string,
+  ) => Promise<string | undefined>;
+  preflight?: WorkflowPreflightResult;
+  preflightLoading: boolean;
+  onSelectIssue: (blockId: string | undefined, field: string) => void;
   trustConfirmed: boolean;
   onTrustChange: (checked: boolean) => void;
   onClose: () => void;
   onRun: () => void;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined;
+    closeButtonRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || dialogRef.current === null) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute('hidden'));
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
+
   return (
     <div
       className="modal-backdrop"
@@ -1476,6 +2366,7 @@ function RunPreview({
       }}
     >
       <section
+        ref={dialogRef}
         className="run-modal"
         role="dialog"
         aria-modal="true"
@@ -1489,7 +2380,12 @@ function RunPreview({
             <small>AUTHORITY REVIEW</small>
             <h2>Review before running</h2>
           </div>
-          <button className="icon-button" onClick={onClose}>
+          <button
+            ref={closeButtonRef}
+            className="icon-button"
+            aria-label="Close run review"
+            onClick={onClose}
+          >
             <X size={17} />
           </button>
         </header>
@@ -1516,6 +2412,18 @@ function RunPreview({
             <Check size={14} /> Manual run
           </span>
         </div>
+        <RunInputFields
+          workflow={workflow}
+          values={inputValues}
+          errors={inputErrors}
+          onChange={onInputChange}
+          selectPath={selectPath}
+        />
+        <PreflightPanel
+          {...(preflight === undefined ? {} : { result: preflight })}
+          loading={preflightLoading}
+          onSelectIssue={onSelectIssue}
+        />
         <div className="command-preview">
           {workflow.blocks.map((block, index) => (
             <article
@@ -1527,26 +2435,18 @@ function RunPreview({
               </span>
               <div>
                 <strong>{block.name}</strong>
-                <code>{commandPreview(block)}</code>
-                <small>
-                  cwd:{' '}
-                  {block.invocation.workingDirectory ?? 'application default'}
-                </small>
-              </div>
-              <div className="preview-authority">
-                {block.invocation.shell && (
-                  <span className="warning-pill">SHELL</span>
-                )}
-                {Object.entries(block.invocation.environment).map(
-                  ([name, value]) => (
-                    <span key={name}>
-                      {name} ←{' '}
-                      {value.source === 'host'
-                        ? `host:${value.name}`
-                        : value.source}
-                    </span>
-                  ),
-                )}
+                <InvocationPreview
+                  block={block}
+                  {...(preflight?.blocks.find(
+                    (preview) => preview.blockId === block.id,
+                  ) === undefined
+                    ? {}
+                    : {
+                        resolved: preflight.blocks.find(
+                          (preview) => preview.blockId === block.id,
+                        )!,
+                      })}
+                />
               </div>
             </article>
           ))}
@@ -1585,9 +2485,13 @@ function RunPreview({
 function ArtifactView({
   label,
   artifact,
+  onCopy,
+  onReveal,
 }: {
   label: string;
   artifact: Artifact;
+  onCopy?: (value: string, label: string) => void;
+  onReveal?: (path: string) => void;
 }) {
   const value =
     artifact.kind === 'filesystem-reference'
@@ -1600,11 +2504,39 @@ function ArtifactView({
       <div>
         <Braces size={13} />
         <strong>{label}</strong>
+        <small className="artifact-provenance">
+          {artifactProvenanceLabel(artifact)}
+        </small>
         <span>{artifact.kind}</span>
+        {onCopy !== undefined && (
+          <button
+            className="icon-button"
+            aria-label={`Copy ${label}`}
+            onClick={() => onCopy(value, label)}
+          >
+            <Copy size={12} />
+          </button>
+        )}
+        {artifact.kind === 'filesystem-reference' && onReveal !== undefined && (
+          <button
+            className="icon-button"
+            aria-label={`Reveal ${label} in Finder`}
+            onClick={() => onReveal(artifact.path)}
+          >
+            <FolderOpen size={12} />
+          </button>
+        )}
       </div>
       <pre>{value}</pre>
     </div>
   );
+}
+
+function artifactProvenanceLabel(artifact: Artifact): string {
+  if ('source' in artifact.provenance) {
+    return `workflow input · ${artifact.provenance.valueSource}`;
+  }
+  return `block output · ${artifact.provenance.blockId}`;
 }
 
 function InspectorSection({
@@ -1630,10 +2562,12 @@ function InspectorSection({
 function DataSection({
   title,
   count,
+  action,
   children,
 }: {
   title: string;
   count?: number;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -1641,6 +2575,7 @@ function DataSection({
       <header>
         <span>{title}</span>
         {count !== undefined && <em>{count}</em>}
+        {action}
       </header>
       {children}
     </section>
@@ -1669,13 +2604,23 @@ function ToolbarButton({
   icon,
   label,
   onClick,
+  disabled = false,
+  title,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
-    <button className="toolbar-button" onClick={onClick}>
+    <button
+      className="toolbar-button"
+      aria-label={label}
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+    >
       {icon}
       <span>{label}</span>
     </button>
@@ -1696,18 +2641,27 @@ function EmptyLine({ text }: { text: string }) {
   return <div className="empty-line">{text}</div>;
 }
 
-function commandPreview(block: ProcessBlock): string {
-  const args = block.invocation.arguments.map((argument) =>
-    argument.type === 'literal'
-      ? quoteArgument(argument.value)
-      : `<input:${argument.portId}>`,
-  );
-  return [block.invocation.executable, ...args].join(' ');
+function removeEditorBlock(
+  workflow: WorkflowDefinition,
+  blockId: string,
+): WorkflowDefinition {
+  return removeBlockPresentation(removeBlock(workflow, blockId), blockId);
 }
 
-function quoteArgument(value: string): string {
-  if (/^[a-zA-Z0-9_./:-]+$/.test(value)) return value;
-  return JSON.stringify(value);
+function serializedHistoryInputs(
+  inputs: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, string>> {
+  try {
+    const parsed: WorkflowRunInputs = parseWorkflowRunInputs(inputs);
+    return Object.fromEntries(
+      Object.entries(parsed).map(([inputId, value]) => [
+        inputId,
+        serializeRunInputValue(value),
+      ]),
+    );
+  } catch {
+    return {};
+  }
 }
 
 function formatTime(value?: string): string {
@@ -1725,6 +2679,31 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function runtimeFailureInspectorField(
+  code: ExecutionFailure['code'],
+  agentBlock: boolean,
+): string {
+  switch (code) {
+    case 'executable_not_found':
+    case 'process_launch_failed':
+      return 'invocation.executable';
+    case 'working_directory_not_found':
+      return 'invocation.workingDirectory';
+    case 'host_environment_variable_missing':
+      return 'invocation.environment';
+    case 'filesystem_reference_inaccessible':
+    case 'invalid_json_output':
+    case 'artifact_routing_failed':
+      return 'invocation.outputs';
+    case 'process_authentication_failed':
+      return agentBlock ? 'editor.agentRuntime' : 'invocation.executable';
+    case 'process_exit_nonzero':
+    case 'process_terminated_by_signal':
+    case 'process_termination_failed':
+      return 'invocation.arguments';
+  }
+}
+
 function stateIcon(state: BlockExecutionState): React.ReactNode {
   if (state === 'running') return <LoaderCircle size={19} className="spin" />;
   if (state === 'succeeded') return <Check size={19} />;
@@ -1739,4 +2718,14 @@ function statusColor(state: BlockExecutionState | 'idle'): string {
   if (state === 'running') return '#e5b767';
   if (state === 'cancelled') return '#aa8df0';
   return '#526075';
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement)
+  );
 }

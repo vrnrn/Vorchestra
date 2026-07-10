@@ -3,23 +3,42 @@
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
 
-import { executeWorkflow, parseWorkflowDefinition } from '@vorchestra/engine';
+import {
+  executeWorkflow,
+  parseWorkflowDefinition,
+  parseWorkflowRunInputs,
+} from '@vorchestra/engine';
 import { NodeProcessRunner } from '@vorchestra/node-runner';
 
 const workflowPath = process.argv[2];
+const inputsFlagIndex = process.argv.indexOf('--inputs');
+const inputsPath =
+  inputsFlagIndex === -1 ? undefined : process.argv[inputsFlagIndex + 1];
 
 if (workflowPath === undefined) {
-  console.error('Usage: npm run workflow:run -- <trusted-workflow-file>');
+  console.error(
+    'Usage: npm run workflow:run -- <trusted-workflow-file> [--inputs <run-inputs.json>]',
+  );
+  process.exitCode = 2;
+} else if (inputsFlagIndex !== -1 && inputsPath === undefined) {
+  console.error('--inputs requires a JSON file path.');
   process.exitCode = 2;
 } else {
   try {
     const serialized = await readFile(workflowPath, 'utf8');
     const workflow = parseWorkflowDefinition(JSON.parse(serialized));
+    const runInputs =
+      inputsPath === undefined
+        ? {}
+        : parseWorkflowRunInputs(
+            JSON.parse(await readFile(inputsPath, 'utf8')),
+          );
     const runner = new NodeProcessRunner();
 
     console.log(`Running trusted workflow: ${workflow.name}`);
     const result = await executeWorkflow(workflow, runner, {
       hostEnvironment: process.env,
+      runInputs,
       onEvent(event) {
         if (event.type === 'block_state_changed') {
           console.log(`${event.blockId}: ${event.to}`);

@@ -1,6 +1,6 @@
 # Vorchestra desktop
 
-Electron host and React canvas for the v0.1 local workflow experience.
+Electron host and React canvas for the v0.2 local workflow experience.
 
 ## Boundaries
 
@@ -13,7 +13,8 @@ Electron host and React canvas for the v0.1 local workflow experience.
   delegates DAG scheduling and artifact routing to `executeWorkflow` and
   delegates child process behavior to `@vorchestra/node-runner`.
 - Saved files contain only the versioned workflow definition. Canvas positions
-  live in `workflow.layout`; run snapshots are not persisted.
+  live in `workflow.layout`; retained run snapshots are sensitive local
+  application data and never enter portable workflow files.
 
 ## Integration assumptions
 
@@ -35,4 +36,12 @@ Electron host and React canvas for the v0.1 local workflow experience.
 npm run dev --workspace @vorchestra/desktop
 npm run build --workspace @vorchestra/desktop
 npm run test --workspace @vorchestra/desktop
+npm run package:mac:unsigned
+npm run release:mac
+npm run desktop:smoke:packaged
+npm run desktop:performance:packaged
 ```
+
+Unsigned release policy, artifact verification, installation, workflow trust,
+and uninstallation are documented in
+[`docs/release/MACOS.md`](../../docs/release/MACOS.md).

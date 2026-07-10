@@ -3,12 +3,23 @@ import type { ArtifactKind } from './schema.js';
 export type JsonValue =
   null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-export interface ArtifactProvenance {
+export interface BlockOutputArtifactProvenance {
   readonly runId: string;
   readonly blockId: string;
   readonly portId: string;
   readonly createdAt: string;
 }
+
+export interface WorkflowInputArtifactProvenance {
+  readonly source: 'workflow-input';
+  readonly runId: string;
+  readonly inputId: string;
+  readonly createdAt: string;
+  readonly valueSource: 'supplied' | 'default';
+}
+
+export type ArtifactProvenance =
+  BlockOutputArtifactProvenance | WorkflowInputArtifactProvenance;
 
 interface ArtifactBase {
   readonly id: string;

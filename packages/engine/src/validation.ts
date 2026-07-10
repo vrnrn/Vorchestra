@@ -7,7 +7,15 @@ import type {
 export type ValidationIssueCode =
   | 'duplicate_block_id'
   | 'duplicate_connection_id'
+  | 'duplicate_workflow_input_id'
+  | 'duplicate_workflow_input_binding_id'
   | 'duplicate_port_id'
+  | 'missing_workflow_input'
+  | 'missing_workflow_input_target_block'
+  | 'missing_workflow_input_target_port'
+  | 'workflow_input_kind_mismatch'
+  | 'workflow_input_default_kind_mismatch'
+  | 'multiple_bindings_to_input'
   | 'missing_source_block'
   | 'missing_target_block'
   | 'missing_source_port'
@@ -57,6 +65,89 @@ export function validateWorkflow(
     }
 
     validateBlockBindings(block, blockIndex, issues);
+  }
+
+  const workflowInputs = new Map(
+    workflow.inputs.map((input) => [input.id, input] as const),
+  );
+  const workflowInputIds = new Set<string>();
+  for (const [inputIndex, input] of workflow.inputs.entries()) {
+    if (workflowInputIds.has(input.id)) {
+      issues.push({
+        code: 'duplicate_workflow_input_id',
+        message: `Workflow input ID "${input.id}" is used more than once.`,
+        path: `inputs[${inputIndex}].id`,
+      });
+    }
+    workflowInputIds.add(input.id);
+
+    if (
+      input.defaultValue !== undefined &&
+      input.defaultValue.kind !== input.artifactKind
+    ) {
+      issues.push({
+        code: 'workflow_input_default_kind_mismatch',
+        message: `Default value for workflow input "${input.id}" has kind "${input.defaultValue.kind}", but the input declares "${input.artifactKind}".`,
+        path: `inputs[${inputIndex}].defaultValue`,
+      });
+    }
+  }
+
+  const workflowInputBindingIds = new Set<string>();
+  const workflowInputTargetCounts = new Map<string, Map<string, number>>();
+  for (const [bindingIndex, binding] of workflow.inputBindings.entries()) {
+    if (workflowInputBindingIds.has(binding.id)) {
+      issues.push({
+        code: 'duplicate_workflow_input_binding_id',
+        message: `Workflow input binding ID "${binding.id}" is used more than once.`,
+        path: `inputBindings[${bindingIndex}].id`,
+      });
+    }
+    workflowInputBindingIds.add(binding.id);
+
+    const input = workflowInputs.get(binding.inputId);
+    const targetBlock = blocks.get(binding.to.blockId);
+    const targetPort = findInputPort(targetBlock, binding.to.portId);
+
+    if (input === undefined) {
+      issues.push({
+        code: 'missing_workflow_input',
+        message: `Workflow input "${binding.inputId}" does not exist.`,
+        path: `inputBindings[${bindingIndex}].inputId`,
+      });
+    }
+    if (targetBlock === undefined) {
+      issues.push({
+        code: 'missing_workflow_input_target_block',
+        message: `Workflow input binding target block "${binding.to.blockId}" does not exist.`,
+        path: `inputBindings[${bindingIndex}].to.blockId`,
+      });
+    } else if (targetPort === undefined) {
+      issues.push({
+        code: 'missing_workflow_input_target_port',
+        message: `Input port "${binding.to.portId}" does not exist on block "${targetBlock.id}".`,
+        path: `inputBindings[${bindingIndex}].to.portId`,
+      });
+    }
+
+    if (input !== undefined && targetPort !== undefined) {
+      if (input.artifactKind !== targetPort.artifactKind) {
+        issues.push({
+          code: 'workflow_input_kind_mismatch',
+          message: `Cannot bind ${input.artifactKind} workflow input to ${targetPort.artifactKind} block input.`,
+          path: `inputBindings[${bindingIndex}]`,
+        });
+      }
+      let blockCounts = workflowInputTargetCounts.get(binding.to.blockId);
+      if (blockCounts === undefined) {
+        blockCounts = new Map();
+        workflowInputTargetCounts.set(binding.to.blockId, blockCounts);
+      }
+      blockCounts.set(
+        binding.to.portId,
+        (blockCounts.get(binding.to.portId) ?? 0) + 1,
+      );
+    }
   }
 
   const connectionIds = new Set<string>();
@@ -142,13 +233,20 @@ export function validateWorkflow(
 
   for (const [blockIndex, block] of workflow.blocks.entries()) {
     for (const [portIndex, input] of block.inputs.entries()) {
-      if (
-        input.required &&
-        !targetConnectionCounts.get(block.id)?.has(input.id)
-      ) {
+      const sourceCount =
+        (targetConnectionCounts.get(block.id)?.get(input.id) ?? 0) +
+        (workflowInputTargetCounts.get(block.id)?.get(input.id) ?? 0);
+      if (sourceCount > 1) {
+        issues.push({
+          code: 'multiple_bindings_to_input',
+          message: `Input "${input.id}" on block "${block.id}" has more than one graph or workflow-input source.`,
+          path: `blocks[${blockIndex}].inputs[${portIndex}]`,
+        });
+      }
+      if (input.required && sourceCount === 0) {
         issues.push({
           code: 'required_input_unconnected',
-          message: `Required input "${input.id}" on block "${block.id}" is not connected.`,
+          message: `Required input "${input.id}" on block "${block.id}" has no graph connection or workflow-input binding.`,
           path: `blocks[${blockIndex}].inputs[${portIndex}]`,
         });
       }

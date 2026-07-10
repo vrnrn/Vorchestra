@@ -31,9 +31,11 @@ export function createProcessBlock(
 export function createWorkflow(): WorkflowDefinition {
   const block = createProcessBlock('welcome', 'Welcome');
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: crypto.randomUUID(),
     name: 'Untitled workflow',
+    inputs: [],
+    inputBindings: [],
     blocks: [block],
     connections: [],
     layout: {

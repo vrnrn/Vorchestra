@@ -2,8 +2,12 @@ import { contextBridge, ipcRenderer } from 'electron';
 import {
   IPC_CHANNELS,
   type DesktopRunEvent,
+  type PreflightWorkflowRequest,
   type SaveWorkflowRequest,
   type SaveWorkflowResult,
+  type RunHistoryRecord,
+  type SelectFilesystemPathRequest,
+  type SelectFilesystemPathResult,
   type VorchestraBridge,
   type WorkflowFileResult,
 } from '../shared/contracts.js';
@@ -18,8 +22,29 @@ const bridge: VorchestraBridge = {
       IPC_CHANNELS.saveWorkflow,
       request,
     ) as Promise<SaveWorkflowResult>,
-  runWorkflow: (workflow) =>
-    ipcRenderer.invoke(IPC_CHANNELS.runWorkflow, workflow) as Promise<{
+  selectFilesystemPath: (request: SelectFilesystemPathRequest) =>
+    ipcRenderer.invoke(
+      IPC_CHANNELS.selectFilesystemPath,
+      request,
+    ) as Promise<SelectFilesystemPathResult>,
+  revealFilesystemPath: (path: string) =>
+    ipcRenderer.invoke(
+      IPC_CHANNELS.revealFilesystemPath,
+      path,
+    ) as Promise<void>,
+  listRunHistory: (workflowId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.listRunHistory, workflowId) as Promise<
+      readonly RunHistoryRecord[]
+    >,
+  clearRunHistory: (workflowId: string) =>
+    ipcRenderer.invoke(
+      IPC_CHANNELS.clearRunHistory,
+      workflowId,
+    ) as Promise<void>,
+  preflightWorkflow: (request: PreflightWorkflowRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.preflightWorkflow, request),
+  runWorkflow: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.runWorkflow, request) as Promise<{
       runId: string;
     }>,
   cancelRun: (runId) =>

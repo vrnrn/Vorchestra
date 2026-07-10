@@ -1,12 +1,22 @@
+import { dirname, isAbsolute, resolve } from 'node:path';
 import {
   executeWorkflow,
+  resolveWorkflowRunInputValues,
   type Artifact,
+  type ProcessRunner,
+  type ProcessRunResult,
   type RuntimeEvent,
   type WorkflowExecutionResult,
   type WorkflowDefinition,
+  type WorkflowRunInputs,
 } from '@vorchestra/engine';
-import { NodeProcessRunner } from '@vorchestra/node-runner';
+import {
+  canonicalizeNodeWorkflowRunInputs,
+  NodeProcessRunner,
+} from '@vorchestra/node-runner';
 import type { BlockRunSnapshot, DesktopRunEvent } from '../shared/contracts.js';
+import type { RunHistoryRecord } from '../shared/contracts.js';
+import { getAgentBlockPresentation } from '../shared/agent-runtime.js';
 
 type EventSink = (event: DesktopRunEvent) => void;
 
@@ -14,6 +24,47 @@ export interface ActiveRun {
   readonly runId: string;
   cancel(): void;
   readonly completion: Promise<void>;
+}
+
+export interface StartWorkflowRunOptions {
+  readonly baseDirectory?: string;
+  readonly runInputs?: WorkflowRunInputs;
+  /** Process authority injection used by tests and alternate desktop hosts. */
+  readonly runner?: ProcessRunner;
+  readonly onCompleted?: (record: RunHistoryRecord) => void | Promise<void>;
+}
+
+export function resolveDesktopWorkflowBaseDirectory(
+  workflowFilePath: string | undefined,
+  homeDirectory: string,
+): string {
+  if (workflowFilePath === undefined) return resolve(homeDirectory);
+  if (!isAbsolute(workflowFilePath)) {
+    throw new Error('Workflow file paths must be absolute.');
+  }
+  return dirname(resolve(workflowFilePath));
+}
+
+export function applyDefaultWorkingDirectory(
+  workflow: WorkflowDefinition,
+  defaultWorkingDirectory: string,
+): WorkflowDefinition {
+  return {
+    ...workflow,
+    blocks: workflow.blocks.map((block) => ({
+      ...block,
+      invocation: {
+        ...block.invocation,
+        workingDirectory:
+          block.invocation.workingDirectory === undefined
+            ? resolve(defaultWorkingDirectory)
+            : resolve(
+                defaultWorkingDirectory,
+                block.invocation.workingDirectory,
+              ),
+      },
+    })),
+  };
 }
 
 /**
@@ -25,27 +76,163 @@ export interface ActiveRun {
 export function startWorkflowRun(
   workflow: WorkflowDefinition,
   onEvent: EventSink,
+  options: StartWorkflowRunOptions = {},
 ): ActiveRun {
   const runId = crypto.randomUUID();
   const controller = new AbortController();
   const snapshots = new Map<string, BlockRunSnapshot>(
     workflow.blocks.map((block) => [block.id, emptySnapshot(block.id)]),
   );
-  const runner = new NodeProcessRunner();
+  const runInputs = canonicalizeNodeWorkflowRunInputs(
+    workflow,
+    options.runInputs,
+    options.baseDirectory,
+  );
+  const runner = createDesktopProcessRunner(
+    workflow,
+    options.runner ??
+      new NodeProcessRunner(
+        options.baseDirectory === undefined
+          ? {}
+          : { baseDirectory: options.baseDirectory },
+      ),
+  );
 
   const execution = executeWorkflow(workflow, runner, {
     runId,
     signal: controller.signal,
     hostEnvironment: process.env,
+    runInputs,
     onEvent: (event) => forwardEvent(event, snapshots, onEvent),
   });
-  const completion = reportExecutionCompletion(execution, runId, onEvent);
+  let completionEvent:
+    Extract<DesktopRunEvent, { type: 'run_completed' }> | undefined;
+  const completion = reportExecutionCompletion(execution, runId, (event) => {
+    if (event.type === 'run_completed') completionEvent = event;
+    else onEvent(event);
+  }).then(async (result) => {
+    let historyError: unknown;
+    if (result !== undefined && options.onCompleted !== undefined) {
+      try {
+        await options.onCompleted({
+          schemaVersion: 1,
+          runId: result.runId,
+          workflowId: result.workflowId,
+          workflowName: workflow.name,
+          startedAt: result.startedAt,
+          completedAt: result.completedAt,
+          outcome: result.outcome,
+          blocks: [...snapshots.values()],
+          runInputs: materializeEffectiveRunInputs(workflow, runInputs),
+        });
+      } catch (error) {
+        historyError = error;
+      }
+    }
+    const terminalEvent = completionEvent ?? {
+      type: 'run_completed' as const,
+      runId,
+      outcome: 'failed' as const,
+      endedAt: new Date().toISOString(),
+      error: {
+        code: 'execution_coordinator_failed' as const,
+        message: 'Execution ended without a terminal runtime event.',
+        nextAction: 'Review application logs and retry the workflow.',
+      },
+    };
+    onEvent(
+      historyError === undefined
+        ? terminalEvent
+        : {
+            ...terminalEvent,
+            error: {
+              code: 'run_history_persistence_failed',
+              message: `Run ${terminalEvent.outcome}, but its local history could not be retained: ${historyError instanceof Error ? historyError.message : String(historyError)}`,
+              nextAction:
+                'Check available disk space and application-data permissions, then run the workflow again.',
+            },
+          },
+    );
+  });
 
   return {
     runId,
     cancel: () => controller.abort(),
     completion,
   };
+}
+
+/**
+ * Desktop-only result translation for specialized editors. The engine and node
+ * runner continue to see only the generic process contract.
+ */
+export function createDesktopProcessRunner(
+  workflow: WorkflowDefinition,
+  delegate: ProcessRunner,
+): ProcessRunner {
+  const agentRuntimes = new Map(
+    workflow.blocks.flatMap((block) => {
+      const presentation = getAgentBlockPresentation(workflow, block.id);
+      return presentation === undefined
+        ? []
+        : ([[block.id, presentation.agentRuntime]] as const);
+    }),
+  );
+
+  return {
+    async run(request, options): Promise<ProcessRunResult> {
+      const result = await delegate.run(request, options);
+      return agentRuntimes.get(request.blockId) === 'codex'
+        ? translateCodexResult(result)
+        : result;
+    },
+  };
+}
+
+export function materializeEffectiveRunInputs(
+  workflow: WorkflowDefinition,
+  runInputs: WorkflowRunInputs | undefined,
+): WorkflowRunInputs {
+  const values = Object.create(null) as Record<
+    string,
+    WorkflowRunInputs[string]
+  >;
+  for (const [inputId, resolved] of resolveWorkflowRunInputValues(
+    workflow,
+    runInputs,
+  )) {
+    values[inputId] = resolved.value;
+  }
+  return values;
+}
+
+function translateCodexResult(result: ProcessRunResult): ProcessRunResult {
+  if (
+    result.status !== 'failed' ||
+    result.failure.code !== 'process_exit_nonzero' ||
+    !looksLikeCodexAuthenticationFailure(
+      `${result.stderr}\n${result.stdout}\n${result.failure.message}`,
+    )
+  ) {
+    return result;
+  }
+
+  return {
+    ...result,
+    failure: {
+      code: 'process_authentication_failed',
+      message: 'Codex CLI could not authenticate with its local configuration.',
+      nextAction:
+        'Run `codex login` in a terminal, confirm `codex exec` works locally, then retry this workflow.',
+      ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+    },
+  };
+}
+
+function looksLikeCodexAuthenticationFailure(diagnostics: string): boolean {
+  return /(?:not (?:logged in|authenticated)|authentication (?:required|failed)|unauthorized|invalid api key|codex login|\b401\b)/i.test(
+    diagnostics,
+  );
 }
 
 function forwardEvent(
@@ -57,6 +244,7 @@ function forwardEvent(
     onEvent({
       type: 'run_started',
       runId: event.runId,
+      startedAt: event.occurredAt,
       blocks: [...snapshots.values()],
     });
     return;
@@ -81,7 +269,7 @@ export async function reportExecutionCompletion(
   execution: Promise<WorkflowExecutionResult>,
   runId: string,
   onEvent: EventSink,
-): Promise<void> {
+): Promise<WorkflowExecutionResult | undefined> {
   try {
     const result = await execution;
     onEvent({
@@ -90,6 +278,7 @@ export async function reportExecutionCompletion(
       outcome: result.outcome,
       endedAt: result.completedAt,
     });
+    return result;
   } catch (error) {
     onEvent({
       type: 'run_completed',
@@ -103,6 +292,7 @@ export async function reportExecutionCompletion(
           'Review workflow validation and application logs, then retry the run.',
       },
     });
+    return undefined;
   }
 }
 

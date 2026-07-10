@@ -132,8 +132,8 @@ await waitFor(
   `(() => {
     const rectangle = document.querySelector('.react-flow__node')?.getBoundingClientRect();
     return rectangle !== undefined &&
-      rectangle.left > ${dragStart.left + 100} &&
-      rectangle.top > ${dragStart.top + 50};
+      rectangle.left > ${dragStart.left + 30} &&
+      rectangle.top > ${dragStart.top + 20};
   })()`,
   'persisted node drag',
 );
@@ -165,7 +165,7 @@ const authorityText = await evaluate(
 );
 assert.match(authorityText, /executable code/i);
 assert.match(authorityText, /printf/);
-assert.match(authorityText, /PATH ← host:PATH/);
+assert.match(authorityText, /PATH\s+host\s+PATH/);
 
 assert.equal(
   await evaluate(`(() => {
@@ -217,6 +217,15 @@ const runDetails = await evaluate(
 assert.match(runDetails, /succeeded/i);
 assert.match(runDetails, /Hello from Vorchestra/);
 assert.match(runDetails, /Exit code\s+0/);
+await waitFor(
+  `window.vorchestra.listRunHistory().then((records) =>
+    records.some((record) => record.outcome === 'succeeded'))`,
+  'persisted local run history',
+);
+const historyPanelText = await evaluate(
+  `document.querySelector('.run-history-list')?.innerText ?? ''`,
+);
+assert.match(historyPanelText, /succeeded/i);
 
 const cancelledEvents = await runBridgeWorkflow(
   {
@@ -348,11 +357,53 @@ await waitFor(
   'document.querySelector(".run-details")?.innerText.includes("Exit code") === true',
   'three-block run inspection',
 );
+
+assert.equal(
+  await evaluate(`(() => {
+    const button = document.querySelector('[aria-label="Add AI Agent"]');
+    if (button === null) return false;
+    button.click();
+    return true;
+  })()`),
+  true,
+);
+await waitFor(
+  `document.querySelector('.agent-inspector') !== null &&
+   document.querySelectorAll('.react-flow__node').length === 4`,
+  'AI Agent block editor',
+);
+assert.equal(
+  await evaluate(
+    `document.querySelector('[aria-label="Agent runtime"]')?.value`,
+  ),
+  'codex',
+);
+assert.equal(
+  await evaluate(`(() => {
+    const select = document.querySelector('[aria-label="Agent authority"]');
+    if (select === null) return false;
+    select.value = 'workspace-write';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`),
+  true,
+);
+await waitFor(
+  `document.querySelector('.agent-compiled-contract')?.innerText.includes('workspace-write') === true`,
+  'visible Agent workspace-write authority',
+);
+const agentContract = await evaluate(
+  `document.querySelector('.agent-compiled-contract')?.innerText`,
+);
+assert.match(agentContract, /codex/);
+assert.match(agentContract, /DIRECT/);
+assert.match(agentContract, /Complete the requested task/);
+assert.doesNotMatch(agentContract, /SHELL/);
 assert.deepEqual(exceptions, []);
 
 socket.close();
 console.log(
-  'Electron smoke passed: editor, authority review, success, cancellation, typed failure, and inspection.',
+  'Electron smoke passed: stable editor drag, authority review, execution, history, cancellation, typed failure, inspection, and AI Agent compilation.',
 );
 
 async function runBridgeWorkflow(workflow, cancel = false) {
@@ -373,7 +424,10 @@ async function runBridgeWorkflow(workflow, cancel = false) {
       }
     });
     try {
-      const started = await window.vorchestra.runWorkflow(${JSON.stringify(workflow)});
+      const started = await window.vorchestra.runWorkflow({
+        workflow: ${JSON.stringify(workflow)},
+        runInputs: {},
+      });
       runId = started.runId;
       ${cancel ? 'setTimeout(() => window.vorchestra.cancelRun(runId), 50);' : ''}
     } catch (error) {

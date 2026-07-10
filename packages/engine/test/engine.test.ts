@@ -1,16 +1,20 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
   createExecutionPlan,
   InvalidWorkflowError,
   parseWorkflowDefinition,
+  preflightWorkflow,
   validateWorkflow,
   type ArtifactKind,
   type InputPort,
   type OutputPort,
   type ProcessBlock,
   type WorkflowDefinition,
+  type WorkflowInput,
+  type WorkflowPreflightAdapter,
 } from '../src/index.js';
 
 test('parses a versioned workflow and applies safe invocation defaults', () => {
@@ -31,12 +35,131 @@ test('parses a versioned workflow and applies safe invocation defaults', () => {
     connections: [],
   });
 
+  assert.equal(workflow.schemaVersion, 2);
+  assert.deepEqual(workflow.inputs, []);
+  assert.deepEqual(workflow.inputBindings, []);
   assert.equal(workflow.blocks[0]?.invocation.shell, false);
   assert.deepEqual(workflow.blocks[0]?.invocation.arguments, []);
   assert.deepEqual(
     Object.keys(workflow.blocks[0]?.invocation.environment ?? {}),
     [],
   );
+});
+
+test('migrates the locked v1 fixture to the canonical v2 schema', async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL(
+        '../../test/fixtures/workflow-v1.vorchestra.json',
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  ) as unknown;
+
+  const workflow = parseWorkflowDefinition(fixture);
+
+  assert.equal(workflow.schemaVersion, 2);
+  assert.equal(workflow.id, 'locked-v1-fixture');
+  assert.deepEqual(workflow.inputs, []);
+  assert.deepEqual(workflow.inputBindings, []);
+  assert.equal(Object.hasOwn(workflow, 'editor'), false);
+  assert.deepEqual(workflow.layout?.blockPositions.source, { x: 120, y: 80 });
+  assert.equal(workflow.blocks[0]?.invocation.executable, 'printf');
+});
+
+test('round-trips canonical v2 workflow inputs and opaque editor metadata', () => {
+  const serialized = {
+    schemaVersion: 2,
+    id: 'v2-round-trip',
+    name: 'v2 round trip',
+    inputs: [
+      {
+        id: 'prompt',
+        name: 'Prompt',
+        artifactKind: 'text',
+        required: true,
+      },
+      {
+        id: 'settings',
+        name: 'Settings',
+        artifactKind: 'json',
+        required: false,
+        defaultValue: {
+          kind: 'json',
+          value: { mode: 'compact', nested: [true, null, 2] },
+        },
+      },
+    ],
+    inputBindings: [],
+    blocks: [],
+    connections: [],
+    editor: {
+      blockPresentation: { source: 'specialized-editor', version: 1 },
+      collapsedGroups: ['advanced'],
+    },
+  };
+
+  const workflow = parseWorkflowDefinition(serialized);
+  const roundTripped = parseWorkflowDefinition(
+    JSON.parse(JSON.stringify(workflow)),
+  );
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(roundTripped)),
+    JSON.parse(JSON.stringify(workflow)),
+  );
+  assert.equal(Object.hasOwn(workflow.inputs[0] ?? {}, 'defaultValue'), false);
+  assert.equal(workflow.inputs[1]?.defaultValue?.kind, 'json');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(workflow.editor)),
+    serialized.editor,
+  );
+
+  assert.throws(() =>
+    parseWorkflowDefinition({ ...serialized, hiddenAuthority: true }),
+  );
+});
+
+test('rejects non-JSON and unsafe editor metadata record shapes', () => {
+  const base = {
+    schemaVersion: 2,
+    id: 'editor-safety',
+    name: 'Editor safety',
+    inputs: [],
+    inputBindings: [],
+    blocks: [],
+    connections: [],
+  };
+  const customPrototype = Object.create({ inherited: true }) as Record<
+    string,
+    unknown
+  >;
+  customPrototype.visible = true;
+  const symbolRecord = { visible: true } as Record<PropertyKey, unknown>;
+  symbolRecord[Symbol('hidden')] = true;
+  const nonEnumerableRecord: Record<string, unknown> = {};
+  Object.defineProperty(nonEnumerableRecord, 'hidden', {
+    value: true,
+    enumerable: false,
+  });
+  const accessorRecord: Record<string, unknown> = {};
+  Object.defineProperty(accessorRecord, 'computed', {
+    get: () => true,
+    enumerable: true,
+  });
+
+  for (const editor of [
+    { invalid: undefined },
+    { invalid: Number.POSITIVE_INFINITY },
+    { invalid: new Date() },
+    customPrototype,
+    symbolRecord,
+    nonEnumerableRecord,
+    accessorRecord,
+  ]) {
+    assert.throws(() => parseWorkflowDefinition({ ...base, editor }));
+  }
 });
 
 test('rejects unknown serialized fields', () => {
@@ -320,6 +443,222 @@ test('reports required inputs that have no connection', () => {
   );
 });
 
+test('preflight normalizes static and run-input blockers with field targets', async () => {
+  const workflow = workflowWith([
+    processBlock('target', [inputPort('required')], []),
+  ]);
+  workflow.inputs = [workflowInput('manual', 'text', true)];
+  const adapter: WorkflowPreflightAdapter = {
+    async preflight() {
+      return {
+        issues: [
+          {
+            severity: 'warning',
+            code: 'adapter_fixture_warning',
+            message: 'Fixture warning.',
+            path: 'blocks[0].invocation.shell',
+            blockId: 'target',
+            field: 'invocation.shell',
+          },
+        ],
+        blocks: [],
+      };
+    },
+  };
+
+  const result = await preflightWorkflow(workflow, adapter);
+
+  assert.equal(result.ready, false);
+  assert.deepEqual(
+    result.issues.find((issue) => issue.code === 'required_input_unconnected'),
+    {
+      severity: 'blocker',
+      code: 'required_input_unconnected',
+      message:
+        'Required input "required" on block "target" has no graph connection or workflow-input binding.',
+      path: 'blocks[0].inputs[0]',
+      field: 'inputs[0]',
+      blockId: 'target',
+    },
+  );
+  assert.ok(
+    result.issues.some((issue) => issue.code === 'missing_required_run_input'),
+  );
+  assert.ok(
+    result.issues.some(
+      (issue) =>
+        issue.severity === 'warning' &&
+        issue.code === 'adapter_fixture_warning',
+    ),
+  );
+});
+
+test('preflight turns adapter rejection into a typed blocker', async () => {
+  const result = await preflightWorkflow(
+    workflowWith([]),
+    {
+      async preflight() {
+        throw new Error('adapter unavailable');
+      },
+    },
+    { hostEnvironment: {} },
+  );
+
+  assert.equal(result.ready, false);
+  assert.deepEqual(result.issues, [
+    {
+      severity: 'blocker',
+      code: 'preflight_adapter_failed',
+      message: 'adapter unavailable',
+      path: 'workflow',
+      field: 'workflow',
+    },
+  ]);
+});
+
+test('preflight maps connection issues to the responsible block field', async () => {
+  const workflow = workflowWith(
+    [
+      processBlock('source', [], [outputPort('payload', 'json')]),
+      processBlock('target', [inputPort('payload', 'text')], []),
+    ],
+    [connection('source-target', 'source', 'payload', 'target', 'payload')],
+  );
+  const adapter: WorkflowPreflightAdapter = {
+    async preflight() {
+      return { issues: [], blocks: [] };
+    },
+  };
+
+  const incompatible = (await preflightWorkflow(workflow, adapter)).issues.find(
+    (issue) => issue.code === 'incompatible_artifact_kinds',
+  );
+
+  assert.deepEqual(incompatible, {
+    severity: 'blocker',
+    code: 'incompatible_artifact_kinds',
+    message: 'Cannot connect json output to text input.',
+    path: 'connections[0]',
+    field: 'inputs',
+    blockId: 'target',
+  });
+
+  workflow.connections[0] = connection(
+    'source-target',
+    'source',
+    'missing-output',
+    'target',
+    'payload',
+  );
+  const missingSourcePort = (
+    await preflightWorkflow(workflow, adapter)
+  ).issues.find((issue) => issue.code === 'missing_source_port');
+
+  assert.deepEqual(missingSourcePort, {
+    severity: 'blocker',
+    code: 'missing_source_port',
+    message: 'Output port "missing-output" does not exist on block "source".',
+    path: 'connections[0].from.portId',
+    field: 'outputs',
+    blockId: 'source',
+  });
+});
+
+test('allows exactly one workflow-input binding to satisfy a required block input', () => {
+  const workflow = workflowWith([
+    processBlock('target', [inputPort('prompt', 'text')], []),
+  ]);
+  workflow.inputs = [workflowInput('prompt', 'text', true)];
+  workflow.inputBindings = [
+    {
+      id: 'prompt-to-target',
+      inputId: 'prompt',
+      to: { blockId: 'target', portId: 'prompt' },
+    },
+  ];
+
+  assert.deepEqual(validateWorkflow(workflow), { valid: true, issues: [] });
+  assert.deepEqual(createExecutionPlan(workflow).layers, [['target']]);
+
+  workflow.inputBindings.push({
+    id: 'second-prompt-to-target',
+    inputId: 'prompt',
+    to: { blockId: 'target', portId: 'prompt' },
+  });
+  assert.ok(
+    validateWorkflow(workflow).issues.some(
+      (issue) => issue.code === 'multiple_bindings_to_input',
+    ),
+  );
+});
+
+test('rejects graph and workflow-input sources targeting the same block input', () => {
+  const workflow = workflowWith(
+    [
+      processBlock('source', [], [outputPort('out', 'text')]),
+      processBlock('target', [inputPort('prompt', 'text')], []),
+    ],
+    [connection('source-target', 'source', 'out', 'target', 'prompt')],
+  );
+  workflow.inputs = [workflowInput('prompt', 'text', true)];
+  workflow.inputBindings = [
+    {
+      id: 'prompt-to-target',
+      inputId: 'prompt',
+      to: { blockId: 'target', portId: 'prompt' },
+    },
+  ];
+
+  const validation = validateWorkflow(workflow);
+
+  assert.ok(
+    validation.issues.some(
+      (issue) => issue.code === 'multiple_bindings_to_input',
+    ),
+  );
+});
+
+test('reports duplicate, missing, and kind-mismatched workflow-input bindings', () => {
+  const workflow = workflowWith([
+    processBlock('target', [inputPort('payload', 'json')], []),
+  ]);
+  workflow.inputs = [
+    workflowInput('payload', 'text', true),
+    workflowInput('payload', 'text', false),
+    {
+      ...workflowInput('bad-default', 'text', false),
+      defaultValue: { kind: 'json', value: null },
+    },
+  ];
+  workflow.inputBindings = [
+    {
+      id: 'duplicate-binding',
+      inputId: 'payload',
+      to: { blockId: 'target', portId: 'payload' },
+    },
+    {
+      id: 'duplicate-binding',
+      inputId: 'missing-input',
+      to: { blockId: 'missing-block', portId: 'payload' },
+    },
+    {
+      id: 'missing-port',
+      inputId: 'payload',
+      to: { blockId: 'target', portId: 'missing-port' },
+    },
+  ];
+
+  const codes = validateWorkflow(workflow).issues.map((issue) => issue.code);
+
+  assert.ok(codes.includes('duplicate_workflow_input_id'));
+  assert.ok(codes.includes('duplicate_workflow_input_binding_id'));
+  assert.ok(codes.includes('missing_workflow_input'));
+  assert.ok(codes.includes('missing_workflow_input_target_block'));
+  assert.ok(codes.includes('missing_workflow_input_target_port'));
+  assert.ok(codes.includes('workflow_input_kind_mismatch'));
+  assert.ok(codes.includes('workflow_input_default_kind_mismatch'));
+});
+
 test('tracks required input connections without delimiter collisions', () => {
   const workflow = workflowWith(
     [
@@ -385,9 +724,11 @@ function workflowWith(
   connections: WorkflowDefinition['connections'] = [],
 ): WorkflowDefinition {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'test-workflow',
     name: 'Test workflow',
+    inputs: [],
+    inputBindings: [],
     blocks,
     connections,
   };
@@ -434,6 +775,14 @@ function outputPort(
   artifactKind: ArtifactKind = 'text',
 ): OutputPort {
   return { id, name: id, artifactKind };
+}
+
+function workflowInput(
+  id: string,
+  artifactKind: ArtifactKind,
+  required: boolean,
+): WorkflowInput {
+  return { id, name: id, artifactKind, required };
 }
 
 function connection(

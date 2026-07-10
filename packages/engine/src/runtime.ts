@@ -16,6 +16,7 @@ export type ExecutionFailureCode =
   | 'host_environment_variable_missing'
   | 'artifact_routing_failed'
   | 'process_launch_failed'
+  | 'process_authentication_failed'
   | 'process_exit_nonzero'
   | 'process_terminated_by_signal'
   | 'process_termination_failed';

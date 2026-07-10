@@ -1,10 +1,23 @@
 import { z } from 'zod';
 
+import type { JsonValue } from './artifact.js';
+
 export const artifactKindSchema = z.enum([
   'text',
   'json',
   'filesystem-reference',
 ]);
+
+export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.null(),
+    z.boolean(),
+    z.number().finite(),
+    z.string(),
+    z.array(jsonValueSchema),
+    objectRecordSchema(z.string(), jsonValueSchema),
+  ]),
+);
 
 const identifierSchema = z.string().trim().min(1);
 
@@ -123,6 +136,62 @@ export const outputBindingSchema = z.discriminatedUnion('type', [
   filesystemOutputBindingSchema,
 ]);
 
+const textWorkflowRunInputValueSchema = z
+  .object({
+    kind: z.literal('text'),
+    value: z.string(),
+  })
+  .strict();
+
+const jsonWorkflowRunInputValueSchema = z
+  .object({
+    kind: z.literal('json'),
+    value: jsonValueSchema,
+  })
+  .strict();
+
+const filesystemWorkflowRunInputValueSchema = z
+  .object({
+    kind: z.literal('filesystem-reference'),
+    path: z.string().trim().min(1),
+    entity: z.enum(['file', 'directory', 'unknown']).optional(),
+  })
+  .strict();
+
+export const workflowRunInputValueSchema = z.discriminatedUnion('kind', [
+  textWorkflowRunInputValueSchema,
+  jsonWorkflowRunInputValueSchema,
+  filesystemWorkflowRunInputValueSchema,
+]);
+
+export const workflowRunInputsSchema = objectRecordSchema(
+  identifierSchema,
+  workflowRunInputValueSchema,
+);
+
+export const workflowInputSchema = z
+  .object({
+    id: identifierSchema,
+    name: z.string().trim().min(1),
+    artifactKind: artifactKindSchema,
+    required: z.boolean(),
+    defaultValue: workflowRunInputValueSchema.optional(),
+  })
+  .strict();
+
+export const workflowInputBindingSchema = z
+  .object({
+    id: identifierSchema,
+    inputId: identifierSchema,
+    to: z
+      .object({
+        blockId: identifierSchema,
+        portId: identifierSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
 export const processInvocationSchema = z
   .object({
     executable: z.string().trim().min(1),
@@ -187,7 +256,7 @@ const blockPositionsSchema = objectRecordSchema(
   blockPositionSchema,
 ) as z.ZodType<Record<string, BlockPosition>>;
 
-export const workflowDefinitionSchema = z
+const workflowDefinitionV1Schema = z
   .object({
     schemaVersion: z.literal(1),
     id: identifierSchema,
@@ -203,15 +272,68 @@ export const workflowDefinitionSchema = z
   })
   .strict();
 
+const editorMetadataSchema = objectRecordSchema(z.string(), jsonValueSchema);
+
+export const workflowDefinitionSchema = z
+  .object({
+    schemaVersion: z.literal(2),
+    id: identifierSchema,
+    name: z.string().trim().min(1),
+    inputs: z.array(workflowInputSchema),
+    inputBindings: z.array(workflowInputBindingSchema),
+    blocks: z.array(processBlockSchema),
+    connections: z.array(connectionSchema),
+    layout: z
+      .object({
+        blockPositions: blockPositionsSchema,
+      })
+      .strict()
+      .optional(),
+    editor: editorMetadataSchema.optional(),
+  })
+  .strict();
+
+const serializedWorkflowDefinitionSchema = z.discriminatedUnion(
+  'schemaVersion',
+  [workflowDefinitionV1Schema, workflowDefinitionSchema],
+);
+
 export type ArtifactKind = z.infer<typeof artifactKindSchema>;
 export type InputPort = z.infer<typeof inputPortSchema>;
 export type OutputPort = z.infer<typeof outputPortSchema>;
 export type ProcessBlock = z.infer<typeof processBlockSchema>;
 export type Connection = z.infer<typeof connectionSchema>;
+export type WorkflowRunInputValue = z.infer<typeof workflowRunInputValueSchema>;
+export type WorkflowRunInputs = z.infer<typeof workflowRunInputsSchema>;
+export type WorkflowInput = z.infer<typeof workflowInputSchema>;
+export type WorkflowInputBinding = z.infer<typeof workflowInputBindingSchema>;
+export type WorkflowDefinitionV1 = z.infer<typeof workflowDefinitionV1Schema>;
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
 
 export function parseWorkflowDefinition(input: unknown): WorkflowDefinition {
-  return workflowDefinitionSchema.parse(input);
+  const workflow = serializedWorkflowDefinitionSchema.parse(input);
+  return workflow.schemaVersion === 1
+    ? migrateWorkflowDefinitionV1(workflow)
+    : workflow;
+}
+
+export function migrateWorkflowDefinitionV1(
+  workflow: WorkflowDefinitionV1,
+): WorkflowDefinition {
+  return {
+    schemaVersion: 2,
+    id: workflow.id,
+    name: workflow.name,
+    inputs: [],
+    inputBindings: [],
+    blocks: workflow.blocks,
+    connections: workflow.connections,
+    ...(workflow.layout === undefined ? {} : { layout: workflow.layout }),
+  };
+}
+
+export function parseWorkflowRunInputs(input: unknown): WorkflowRunInputs {
+  return workflowRunInputsSchema.parse(input);
 }
 
 const invalidRecordInput = Symbol('invalid-record-input');
@@ -227,7 +349,8 @@ function objectRecordSchema<Value>(
           typeof input !== 'object' ||
           input === null ||
           Array.isArray(input) ||
-          !hasRecordPrototype(input)
+          !hasRecordPrototype(input) ||
+          !hasOnlyEnumerableStringKeys(input)
         ) {
           return invalidRecordInput;
         }
@@ -239,6 +362,16 @@ function objectRecordSchema<Value>(
       z.array(z.tuple([keySchema, valueSchema])),
     )
     .transform((entries) => nullPrototypeRecord(entries));
+}
+
+function hasOnlyEnumerableStringKeys(input: object): boolean {
+  return Reflect.ownKeys(input).every((key) => {
+    if (typeof key !== 'string') return false;
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    return (
+      descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value')
+    );
+  });
 }
 
 function hasRecordPrototype(input: object): boolean {

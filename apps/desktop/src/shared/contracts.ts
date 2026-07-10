@@ -2,7 +2,9 @@ import type {
   Artifact,
   BlockExecutionState,
   ExecutionFailure,
+  WorkflowPreflightResult,
   WorkflowDefinition,
+  WorkflowRunInputs,
 } from '@vorchestra/engine';
 
 export interface WorkflowFileResult {
@@ -22,6 +24,16 @@ export interface SaveWorkflowResult {
   readonly filePath?: string;
 }
 
+export interface SelectFilesystemPathRequest {
+  readonly kind: 'file' | 'directory' | 'output-file';
+  readonly defaultPath?: string;
+}
+
+export interface SelectFilesystemPathResult {
+  readonly canceled: boolean;
+  readonly path?: string;
+}
+
 export interface BlockRunSnapshot {
   readonly blockId: string;
   readonly state: BlockExecutionState;
@@ -36,10 +48,23 @@ export interface BlockRunSnapshot {
   readonly skipReason?: string;
 }
 
+export interface RunHistoryRecord {
+  readonly schemaVersion: 1;
+  readonly runId: string;
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly outcome: 'succeeded' | 'failed' | 'cancelled';
+  readonly blocks: readonly BlockRunSnapshot[];
+  readonly runInputs: WorkflowRunInputs;
+}
+
 export type DesktopRunEvent =
   | {
       readonly type: 'run_started';
       readonly runId: string;
+      readonly startedAt: string;
       readonly blocks: readonly BlockRunSnapshot[];
     }
   | {
@@ -53,7 +78,8 @@ export type DesktopRunEvent =
       readonly outcome: 'succeeded' | 'failed' | 'cancelled';
       readonly endedAt: string;
       readonly error?: {
-        readonly code: 'execution_coordinator_failed';
+        readonly code:
+          'execution_coordinator_failed' | 'run_history_persistence_failed';
         readonly message: string;
         readonly nextAction: string;
       };
@@ -63,10 +89,27 @@ export interface RunWorkflowResult {
   readonly runId: string;
 }
 
+export interface RunWorkflowRequest {
+  readonly workflow: WorkflowDefinition;
+  readonly runInputs: WorkflowRunInputs;
+  readonly workflowFilePath?: string;
+}
+
+export type PreflightWorkflowRequest = RunWorkflowRequest;
+
 export interface VorchestraBridge {
   openWorkflow(): Promise<WorkflowFileResult>;
   saveWorkflow(request: SaveWorkflowRequest): Promise<SaveWorkflowResult>;
-  runWorkflow(workflow: WorkflowDefinition): Promise<RunWorkflowResult>;
+  selectFilesystemPath(
+    request: SelectFilesystemPathRequest,
+  ): Promise<SelectFilesystemPathResult>;
+  revealFilesystemPath(path: string): Promise<void>;
+  listRunHistory(workflowId: string): Promise<readonly RunHistoryRecord[]>;
+  clearRunHistory(workflowId: string): Promise<void>;
+  preflightWorkflow(
+    request: PreflightWorkflowRequest,
+  ): Promise<WorkflowPreflightResult>;
+  runWorkflow(request: RunWorkflowRequest): Promise<RunWorkflowResult>;
   cancelRun(runId: string): Promise<void>;
   onRunEvent(listener: (event: DesktopRunEvent) => void): () => void;
 }
@@ -74,6 +117,11 @@ export interface VorchestraBridge {
 export const IPC_CHANNELS = {
   openWorkflow: 'workflow:open',
   saveWorkflow: 'workflow:save',
+  selectFilesystemPath: 'filesystem:select',
+  revealFilesystemPath: 'filesystem:reveal',
+  listRunHistory: 'run-history:list',
+  clearRunHistory: 'run-history:clear',
+  preflightWorkflow: 'run:preflight',
   runWorkflow: 'run:start',
   cancelRun: 'run:cancel',
   runEvent: 'run:event',
