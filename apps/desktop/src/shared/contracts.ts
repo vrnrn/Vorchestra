@@ -34,6 +34,24 @@ export interface SelectFilesystemPathResult {
   readonly path?: string;
 }
 
+export interface UserToolModelCatalog {
+  readonly default?: string;
+  readonly models: readonly string[];
+}
+
+export interface UserModelCatalog {
+  readonly schemaVersion: 1;
+  readonly codex: UserToolModelCatalog;
+  readonly cline: UserToolModelCatalog;
+  readonly agy: UserToolModelCatalog;
+}
+
+export interface UserModelCatalogResult {
+  readonly filePath: string;
+  readonly catalog: UserModelCatalog;
+  readonly issue?: string;
+}
+
 export interface BlockRunSnapshot {
   readonly blockId: string;
   readonly state: BlockExecutionState;
@@ -124,6 +142,7 @@ export interface RunWorkflowRequest {
 export type PreflightWorkflowRequest = RunWorkflowRequest;
 
 export interface VorchestraBridge {
+  getUserModelCatalog(): Promise<UserModelCatalogResult>;
   openWorkflow(): Promise<WorkflowFileResult>;
   saveWorkflow(request: SaveWorkflowRequest): Promise<SaveWorkflowResult>;
   selectFilesystemPath(
@@ -149,6 +168,7 @@ export interface VorchestraBridge {
 }
 
 export const IPC_CHANNELS = {
+  getUserModelCatalog: 'settings:model-catalog',
   openWorkflow: 'workflow:open',
   saveWorkflow: 'workflow:save',
   selectFilesystemPath: 'filesystem:select',

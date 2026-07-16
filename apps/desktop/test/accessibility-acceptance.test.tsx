@@ -41,6 +41,15 @@ describe('v0.2 primary editor accessibility acceptance', () => {
     Object.defineProperty(window, 'vorchestra', {
       configurable: true,
       value: {
+        getUserModelCatalog: vi.fn().mockResolvedValue({
+          filePath: '/home/test/.vorchestra/models.json',
+          catalog: {
+            schemaVersion: 1,
+            codex: { models: [] },
+            cline: { models: [] },
+            agy: { models: [] },
+          },
+        }),
         openWorkflow: vi.fn(),
         saveWorkflow: vi.fn(),
         selectFilesystemPath: vi.fn(),
@@ -75,7 +84,6 @@ describe('v0.2 primary editor accessibility acceptance', () => {
       'Redo',
       'Copy block',
       'Paste block',
-      'Duplicate block',
       'Auto arrange',
       'Add process',
       'Add AI Agent',
@@ -91,9 +99,7 @@ describe('v0.2 primary editor accessibility acceptance', () => {
     expect(
       getByRole('region', { name: 'Local run history' }),
     ).toBeInTheDocument();
-    expect(
-      getByRole('toolbar', { name: 'Block and canvas controls' }),
-    ).toBeInTheDocument();
+    expect(getByLabelText('Canvas controls')).toBeInTheDocument();
     expect(getByLabelText('Workflow name')).toHaveAccessibleName(
       'Workflow name',
     );

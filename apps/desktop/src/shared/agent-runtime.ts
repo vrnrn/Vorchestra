@@ -3,6 +3,7 @@ import type {
   ProcessBlock,
   WorkflowDefinition,
 } from '@vorchestra/engine';
+import type { UserModelCatalog, UserToolModelCatalog } from './contracts.js';
 
 export type AgentRuntimeId = 'codex' | 'cline' | 'antigravity';
 
@@ -73,13 +74,13 @@ export const AGENT_RUNTIME_REGISTRY: readonly AgentRuntimeDescriptor[] = [
     guidance: 'Runs one-shot Cline CLI using Cline-owned authentication.',
     modelOverride: true,
     instructionDeliveryModes: ['argument', 'template'],
-    separateTextContext: true,
+    separateTextContext: false,
     authorities: ['read-only', 'workspace-write'],
     declaredFilesystemOutputs: true,
     capabilities: {
       modelOverride: true,
       instructionDeliveryModes: ['argument', 'template'],
-      separateTextContext: true,
+      separateTextContext: false,
       authorities: ['read-only', 'workspace-write'],
       declaredFilesystemOutputs: true,
       images: false,
@@ -187,6 +188,9 @@ export interface AgentBlockMetadataIssue {
   readonly field: 'editor.agentRuntime' | 'editor.isolation';
   readonly message: string;
 }
+
+export const CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE =
+  '{{instruction}}\n\nConnected context:\n{{context}}';
 
 const desktopEditorKey = 'vorchestra.desktop';
 
@@ -343,6 +347,10 @@ export function agentEditorConfigFromBlock(
         : undefined;
   const stdinPort = block.inputs.find((input) => input.id === contextPortId);
   const templateInstruction = templateArgument?.inputs.instruction;
+  const migrateClineStdinContext =
+    presentation.agentRuntime === 'cline' &&
+    templateArgument === undefined &&
+    stdinPort !== undefined;
 
   return {
     id: block.id,
@@ -353,7 +361,12 @@ export function agentEditorConfigFromBlock(
         ? templateInstruction.value
         : instructionFromArguments(presentation.agentRuntime, arguments_),
     ...(templateArgument === undefined
-      ? {}
+      ? migrateClineStdinContext
+        ? {
+            instructionDelivery: 'template' as const,
+            instructionTemplate: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+          }
+        : {}
       : {
           instructionDelivery: 'template',
           instructionTemplate: templateArgument.template,
@@ -386,6 +399,132 @@ export function agentEditorConfigFromBlock(
         },
       ];
     }),
+  };
+}
+
+/**
+ * Cline 3.0.39 consumes piped context only in JSON event mode. Vorchestra's
+ * direct text-output integration therefore places connected context in the
+ * visible positional instruction template. This upgrades v0.3 blocks compiled
+ * before that CLI behavior was verified.
+ */
+export function normalizeAgentRuntimeWorkflow(workflow: WorkflowDefinition): {
+  readonly workflow: WorkflowDefinition;
+  readonly migratedBlockIds: readonly string[];
+} {
+  const migratedBlockIds: string[] = [];
+  const blocks = workflow.blocks.map((block) => {
+    const presentation = getAgentBlockPresentation(workflow, block.id);
+    if (
+      presentation?.agentRuntime !== 'cline' ||
+      block.invocation.stdin === undefined ||
+      !('portId' in block.invocation.stdin) ||
+      block.invocation.arguments.some(
+        (argument) => argument.type === 'template',
+      )
+    ) {
+      return block;
+    }
+    const config = agentEditorConfigFromBlock(block, presentation);
+    if (config.textContext === undefined) return block;
+    migratedBlockIds.push(block.id);
+    return compileAgentBlock({
+      ...config,
+      instructionDelivery: 'template',
+      instructionTemplate: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+    });
+  });
+  return migratedBlockIds.length === 0
+    ? { workflow, migratedBlockIds }
+    : { workflow: { ...workflow, blocks }, migratedBlockIds };
+}
+
+export function modelsForAgentRuntime(
+  catalog: UserModelCatalog,
+  runtime: AgentRuntimeId,
+): UserToolModelCatalog {
+  switch (runtime) {
+    case 'codex':
+      return catalog.codex;
+    case 'cline':
+      return catalog.cline;
+    case 'antigravity':
+      return catalog.agy;
+  }
+}
+
+/** Apply machine-local defaults only when a block has no explicit model. */
+export function applyUserModelDefaults(
+  workflow: WorkflowDefinition,
+  catalog: UserModelCatalog,
+): WorkflowDefinition {
+  let changed = false;
+  const blocks = workflow.blocks.map((block) => {
+    const presentation = getAgentBlockPresentation(workflow, block.id);
+    if (presentation === undefined) return block;
+    const config = agentEditorConfigFromBlock(block, presentation);
+    const configuredDefault = modelsForAgentRuntime(
+      catalog,
+      presentation.agentRuntime,
+    ).default;
+    if (config.model !== undefined || configuredDefault === undefined) {
+      return block;
+    }
+    changed = true;
+    return compileAgentBlock({ ...config, model: configuredDefault });
+  });
+  return changed ? { ...workflow, blocks } : workflow;
+}
+
+export function alignAgentRuntimeWorkingDirectories(
+  workflow: WorkflowDefinition,
+): WorkflowDefinition {
+  let changed = false;
+  const blocks = workflow.blocks.map((block) => {
+    const workingDirectory = block.invocation.workingDirectory;
+    const presentation = getAgentBlockPresentation(workflow, block.id);
+    if (
+      presentation?.agentRuntime !== 'antigravity' ||
+      workingDirectory === undefined
+    ) {
+      return block;
+    }
+    changed = true;
+    return withResolvedAgentWorkingDirectory(
+      block,
+      presentation,
+      workingDirectory,
+    );
+  });
+  return changed ? { ...workflow, blocks } : workflow;
+}
+
+export function withResolvedAgentWorkingDirectory(
+  block: ProcessBlock,
+  presentation: AgentBlockPresentation | undefined,
+  workingDirectory: string,
+): ProcessBlock {
+  if (presentation?.agentRuntime !== 'antigravity') return block;
+  const argumentsWithoutWorkspace: ProcessBlock['invocation']['arguments'] = [];
+  for (let index = 0; index < block.invocation.arguments.length; index += 1) {
+    const argument = block.invocation.arguments[index]!;
+    if (argument.type === 'literal' && argument.value === '--add-dir') {
+      index += 1;
+      continue;
+    }
+    argumentsWithoutWorkspace.push(argument);
+  }
+  return {
+    ...block,
+    invocation: {
+      ...block.invocation,
+      workingDirectory,
+      arguments: [
+        literal('--add-dir'),
+        literal(workingDirectory),
+        ...argumentsWithoutWorkspace,
+      ],
+    },
   };
 }
 
@@ -503,6 +642,7 @@ function codexArguments(
   return [
     literal('exec'),
     literal('--ephemeral'),
+    literal('--skip-git-repo-check'),
     literal('--sandbox'),
     literal(config.authority),
     literal('--color'),
@@ -530,7 +670,7 @@ function compileClineAgentBlock(config: AgentBlockEditorConfig): ProcessBlock {
 function compileAntigravityAgentBlock(
   config: AgentBlockEditorConfig,
 ): ProcessBlock {
-  return compileDirectAgentBlock(config, {
+  const block = compileDirectAgentBlock(config, {
     executable: 'agy',
     arguments: [
       ...(config.authority === 'read-only' ? [literal('--sandbox')] : []),
@@ -541,6 +681,13 @@ function compileAntigravityAgentBlock(
       agentInstructionArgument(config),
     ],
   });
+  return config.workingDirectory === undefined
+    ? block
+    : withResolvedAgentWorkingDirectory(
+        block,
+        { kind: 'ai-agent', agentRuntime: 'antigravity' },
+        config.workingDirectory,
+      );
 }
 
 function compileDirectAgentBlock(

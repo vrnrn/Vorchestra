@@ -6,10 +6,14 @@ import {
 } from '@vorchestra/engine';
 import {
   AGENT_RUNTIME_REGISTRY,
+  CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+  alignAgentRuntimeWorkingDirectories,
   agentEditorConfigFromBlock,
+  applyUserModelDefaults,
   compileAgentBlock,
   getAgentRuntimeDescriptor,
   getAgentBlockPresentation,
+  normalizeAgentRuntimeWorkflow,
   removeBlockPresentation,
   setAgentBlockPresentation,
   type AgentBlockEditorConfig,
@@ -101,6 +105,7 @@ describe('Codex Agent runtime compiler', () => {
     expect(argumentValues(block)).toEqual([
       'exec',
       '--ephemeral',
+      '--skip-git-repo-check',
       '--sandbox',
       'read-only',
       '--color',
@@ -143,6 +148,7 @@ describe('Codex Agent runtime compiler', () => {
     expect(argumentValues(block)).toEqual([
       'exec',
       '--ephemeral',
+      '--skip-git-repo-check',
       '--sandbox',
       'workspace-write',
       '--color',
@@ -158,7 +164,7 @@ describe('Codex Agent runtime compiler', () => {
     expectValidStandaloneBlock(block);
   });
 
-  it('never emits model, streaming, resume, shell, worktree, or bypass behavior', () => {
+  it('never emits model, streaming, resume, shell, worktree, or authority-bypass behavior', () => {
     const block = compileAgentBlock({
       id: 'bounded-agent',
       name: 'Bounded agent',
@@ -171,6 +177,7 @@ describe('Codex Agent runtime compiler', () => {
     const arguments_ = argumentValues(block);
 
     expect(arguments_).not.toContain('--model');
+    expect(arguments_).toContain('--skip-git-repo-check');
     expect(arguments_).not.toContain('--json');
     expect(arguments_).not.toContain('resume');
     expect(arguments_).not.toContain('--full-auto');
@@ -245,13 +252,19 @@ describe('capability-aware Agent runtime registry', () => {
         instructionDeliveryModes: ['argument', 'template'],
       },
     });
+    expect(getAgentRuntimeDescriptor('cline').capabilities).toMatchObject({
+      separateTextContext: false,
+      structuredEvents: false,
+    });
   });
 
-  it('compiles a Cline one-shot with exact model, prompt, and read-only intent', () => {
+  it('compiles Cline context into its visible positional prompt template', () => {
     const instruction = 'Inspect this repository exactly once.  ';
     const block = compileAgentBlock({
       ...baseConfig('cline', instruction),
       model: 'openai/gpt-5.3-codex',
+      instructionDelivery: 'template',
+      instructionTemplate: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
       textContext: { portId: 'context', name: 'Review context' },
       workingDirectory: '/workspace/project',
       authority: 'read-only',
@@ -262,9 +275,17 @@ describe('capability-aware Agent runtime registry', () => {
       '--plan',
       '--model',
       'openai/gpt-5.3-codex',
-      instruction,
+      `template:${CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE}`,
     ]);
-    expect(block.invocation.stdin).toEqual({ portId: 'context' });
+    expect(block.invocation.stdin).toBeUndefined();
+    expect(block.invocation.arguments.at(-1)).toEqual({
+      type: 'template',
+      template: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+      inputs: {
+        instruction: { value: instruction },
+        context: { portId: 'context' },
+      },
+    });
     expect(block.invocation.shell).toBe(false);
     expectForbiddenBypasses(block);
     expect(
@@ -275,10 +296,78 @@ describe('capability-aware Agent runtime registry', () => {
     ).toMatchObject({
       agentRuntime: 'cline',
       instruction,
+      instructionDelivery: 'template',
+      instructionTemplate: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
       model: 'openai/gpt-5.3-codex',
       authority: 'read-only',
     });
     expectValidStandaloneBlock(block);
+  });
+
+  it('migrates legacy Cline stdin context to the positional template', () => {
+    const base = compileAgentBlock(
+      baseConfig('cline', 'Complete the requested task.'),
+    );
+    const legacy: ProcessBlock = {
+      ...base,
+      inputs: [
+        {
+          id: 'context',
+          name: 'Context',
+          artifactKind: 'text',
+          required: false,
+        },
+      ],
+      invocation: { ...base.invocation, stdin: { portId: 'context' } },
+    };
+    const workflow = setAgentBlockPresentation(
+      { ...createWorkflow(), blocks: [legacy], connections: [] },
+      legacy.id,
+      'cline',
+    );
+
+    expect(
+      agentEditorConfigFromBlock(legacy, {
+        kind: 'ai-agent',
+        agentRuntime: 'cline',
+      }),
+    ).toMatchObject({
+      instructionDelivery: 'template',
+      instructionTemplate: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+      textContext: { portId: 'context' },
+    });
+
+    const normalized = normalizeAgentRuntimeWorkflow(workflow);
+    const migrated = normalized.workflow.blocks[0]!;
+    expect(normalized.migratedBlockIds).toEqual([legacy.id]);
+    expect(migrated.invocation.stdin).toBeUndefined();
+    expect(migrated.invocation.arguments.at(-1)).toMatchObject({
+      type: 'template',
+      template: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+      inputs: { context: { portId: 'context' } },
+    });
+  });
+
+  it('applies a machine-local default only when the block has no explicit model', () => {
+    const block = compileAgentBlock(baseConfig('codex', 'Review this.'));
+    const workflow = setAgentBlockPresentation(
+      { ...createWorkflow(), blocks: [block], connections: [] },
+      block.id,
+      'codex',
+    );
+    const configured = applyUserModelDefaults(workflow, {
+      schemaVersion: 1,
+      codex: {
+        default: 'test/default-model',
+        models: ['test/default-model'],
+      },
+      cline: { models: [] },
+      agy: { models: [] },
+    });
+
+    expect(argumentValues(configured.blocks[0]!)).toContain(
+      'test/default-model',
+    );
   });
 
   it('compiles Antigravity print mode without permission bypasses', () => {
@@ -286,11 +375,14 @@ describe('capability-aware Agent runtime registry', () => {
     const block = compileAgentBlock({
       ...baseConfig('antigravity', instruction),
       model: 'gemini-2.5-pro',
+      workingDirectory: '/workspace/project',
       authority: 'workspace-write',
     });
 
     expect(block.invocation.executable).toBe('agy');
     expect(argumentValues(block)).toEqual([
+      '--add-dir',
+      '/workspace/project',
       '--model',
       'gemini-2.5-pro',
       '--print',
@@ -308,8 +400,41 @@ describe('capability-aware Agent runtime registry', () => {
       instruction,
       model: 'gemini-2.5-pro',
       authority: 'workspace-write',
+      workingDirectory: '/workspace/project',
     });
+    expect(argumentValues(block)).not.toContain('--new-project');
     expectValidStandaloneBlock(block);
+  });
+
+  it('aligns legacy Antigravity blocks with the final resolved directory', () => {
+    const block = compileAgentBlock({
+      ...baseConfig('antigravity', 'Inspect the workspace.'),
+      authority: 'read-only',
+    });
+    const workflow = setAgentBlockPresentation(
+      {
+        ...createWorkflow(),
+        blocks: [
+          {
+            ...block,
+            invocation: {
+              ...block.invocation,
+              workingDirectory: '/resolved/worktree',
+            },
+          },
+        ],
+        connections: [],
+      },
+      block.id,
+      'antigravity',
+    );
+
+    const aligned = alignAgentRuntimeWorkingDirectories(workflow).blocks[0]!;
+    expect(argumentValues(aligned).slice(0, 2)).toEqual([
+      '--add-dir',
+      '/resolved/worktree',
+    ]);
+    expect(argumentValues(aligned)).not.toContain('--new-project');
   });
 
   it('composes exact instruction and connected context through a visible generic argument template', () => {
@@ -352,6 +477,12 @@ describe('capability-aware Agent runtime registry', () => {
     expect(() =>
       compileAgentBlock({
         ...baseConfig('antigravity', 'Use this context.'),
+        textContext: { portId: 'context', name: 'Context' },
+      }),
+    ).toThrow('cannot receive separate connected text context');
+    expect(() =>
+      compileAgentBlock({
+        ...baseConfig('cline', 'Use this context.'),
         textContext: { portId: 'context', name: 'Context' },
       }),
     ).toThrow('cannot receive separate connected text context');
@@ -423,7 +554,6 @@ function expectForbiddenBypasses(block: ProcessBlock): void {
   expect(arguments_).not.toContain('--yolo');
   expect(arguments_).not.toContain('--auto-approve');
   expect(arguments_).not.toContain('--dangerously-skip-permissions');
-  expect(arguments_).not.toContain('--skip-git-repo-check');
   expect(arguments_).not.toContain(
     '--dangerously-bypass-approvals-and-sandbox',
   );
@@ -431,7 +561,6 @@ function expectForbiddenBypasses(block: ProcessBlock): void {
 
 function argumentValues(block: ProcessBlock): string[] {
   return block.invocation.arguments.map((argument) => {
-    expect(argument.type).toBe('literal');
     return argument.type === 'literal'
       ? argument.value
       : argument.type === 'input'

@@ -9,9 +9,11 @@ import {
 } from 'lucide-react';
 import {
   AGENT_RUNTIME_REGISTRY,
+  CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
   agentEditorConfigFromBlock,
   compileAgentBlock,
   getAgentRuntimeDescriptor,
+  modelsForAgentRuntime,
   type AgentBlockEditorConfig,
   type AgentBlockPresentation,
   type AgentFilesystemOutputConfig,
@@ -19,6 +21,7 @@ import {
   type AgentInstructionDeliveryMode,
   type AgentRuntimeId,
 } from '../../shared/agent-runtime';
+import type { UserModelCatalog } from '../../shared/contracts';
 import { InvocationPreview } from './InvocationPreview';
 
 type PathSelector = (
@@ -40,13 +43,25 @@ export function AgentBlockInspector({
   presentation,
   onChange,
   selectPath,
+  modelCatalog,
+  modelCatalogPath,
 }: {
   block: ProcessBlock;
   presentation: AgentBlockPresentation;
   onChange: (block: ProcessBlock, presentation: AgentBlockPresentation) => void;
   selectPath: PathSelector;
+  modelCatalog?: UserModelCatalog;
+  modelCatalogPath?: string;
 }) {
-  const config = agentEditorConfigFromBlock(block, presentation);
+  const reconstructed = agentEditorConfigFromBlock(block, presentation);
+  const configuredModels =
+    modelCatalog === undefined
+      ? { models: [] as readonly string[] }
+      : modelsForAgentRuntime(modelCatalog, reconstructed.agentRuntime);
+  const config: AgentBlockEditorConfig =
+    reconstructed.model === undefined && configuredModels.default !== undefined
+      ? { ...reconstructed, model: configuredModels.default }
+      : reconstructed;
   const runtime = getAgentRuntimeDescriptor(config.agentRuntime);
   const commit = (next: AgentBlockEditorConfig): void =>
     onChange(compileAgentBlock(next), presentationFromConfig(next));
@@ -64,11 +79,19 @@ export function AgentBlockInspector({
   const selectRuntime = (agentRuntime: AgentRuntimeId): void => {
     const nextRuntime = getAgentRuntimeDescriptor(agentRuntime);
     const next: MutableAgentBlockEditorConfig = { ...config, agentRuntime };
+    const nextModels =
+      modelCatalog === undefined
+        ? undefined
+        : modelsForAgentRuntime(modelCatalog, agentRuntime);
+    if (nextModels?.default === undefined) delete next.model;
+    else next.model = nextModels.default;
     if (
       !nextRuntime.capabilities.separateTextContext &&
+      next.textContext !== undefined &&
       (next.instructionDelivery ?? 'argument') !== 'template'
     ) {
-      delete next.textContext;
+      next.instructionDelivery = 'template';
+      next.instructionTemplate = CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE;
     }
     if (!nextRuntime.capabilities.modelOverride) {
       delete next.model;
@@ -124,21 +147,43 @@ export function AgentBlockInspector({
               <span>Model</span>
               <select
                 data-inspector-field="editor.model"
-                aria-label="Agent model source"
-                value={config.model === undefined ? 'default' : 'override'}
+                aria-label="Agent model"
+                value={modelSelection(config.model, configuredModels.models)}
                 onChange={(event) => {
-                  if (event.target.value === 'default') {
+                  if (event.target.value === 'runtime-default') {
                     removeSetting('model');
+                    return;
+                  }
+                  if (event.target.value.startsWith('configured:')) {
+                    const index = Number(
+                      event.target.value.slice('configured:'.length),
+                    );
+                    const model = configuredModels.models[index];
+                    if (model !== undefined) update({ model });
                     return;
                   }
                   update({ model: '' });
                 }}
               >
-                <option value="default">Use runtime default</option>
-                <option value="override">Override for this block</option>
+                {configuredModels.default === undefined && (
+                  <option value="runtime-default">Use runtime default</option>
+                )}
+                {configuredModels.models.map((model, index) => (
+                  <option key={model} value={`configured:${index}`}>
+                    {model}
+                    {model === configuredModels.default ? ' (default)' : ''}
+                  </option>
+                ))}
+                <option value="custom">Custom…</option>
               </select>
+              <small>
+                {modelCatalogPath === undefined
+                  ? 'Loading the user model catalog…'
+                  : `Configured in ${modelCatalogPath}`}
+              </small>
             </label>
-            {config.model !== undefined && (
+            {modelSelection(config.model, configuredModels.models) ===
+              'custom' && (
               <label className="field">
                 <span>Model identifier</span>
                 <input
@@ -150,7 +195,7 @@ export function AgentBlockInspector({
                 />
                 <small>
                   Passed exactly to {runtime.displayName}; credentials and the
-                  model catalog remain runtime-owned.
+                  model remain runtime-owned.
                 </small>
               </label>
             )}
@@ -177,7 +222,7 @@ export function AgentBlockInspector({
                   instructionTemplate:
                     config.textContext === undefined
                       ? '{{instruction}}'
-                      : '{{instruction}}\n\nConnected context:\n{{context}}',
+                      : CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
                 });
                 return;
               }
@@ -189,7 +234,15 @@ export function AgentBlockInspector({
             }}
           >
             {runtime.capabilities.instructionDeliveryModes.map((mode) => (
-              <option key={mode} value={mode}>
+              <option
+                key={mode}
+                value={mode}
+                disabled={
+                  mode !== 'template' &&
+                  config.textContext !== undefined &&
+                  !runtime.capabilities.separateTextContext
+                }
+              >
                 {instructionDeliveryLabel(mode)}
               </option>
             ))}
@@ -227,7 +280,7 @@ export function AgentBlockInspector({
                 config.instructionTemplate ??
                 (config.textContext === undefined
                   ? '{{instruction}}'
-                  : '{{instruction}}\n\nConnected context:\n{{context}}')
+                  : CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE)
               }
               onChange={(event) =>
                 update({ instructionTemplate: event.target.value })
@@ -259,7 +312,7 @@ export function AgentBlockInspector({
                       'template'
                         ? {
                             instructionTemplate:
-                              '{{instruction}}\n\nConnected context:\n{{context}}',
+                              CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
                           }
                         : {}),
                     });
@@ -597,10 +650,19 @@ export function AgentBlockInspector({
           <Bot size={14} />
           <strong>Compiled generic process</strong>
         </header>
-        <InvocationPreview block={block} />
+        <InvocationPreview block={compileAgentBlock(config)} />
       </section>
     </div>
   );
+}
+
+function modelSelection(
+  model: string | undefined,
+  configuredModels: readonly string[],
+): string {
+  if (model === undefined) return 'runtime-default';
+  const index = configuredModels.indexOf(model);
+  return index < 0 ? 'custom' : `configured:${index}`;
 }
 
 function updateFilesystemOutput(

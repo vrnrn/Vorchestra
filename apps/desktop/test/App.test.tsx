@@ -9,6 +9,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, runtimeFailureInspectorField } from '../src/renderer/src/App';
 import {
+  compileAgentBlock,
+  setAgentBlockPresentation,
+} from '../src/shared/agent-runtime';
+import {
   readWorkflowDraft,
   writeWorkflowDraft,
   type DraftStorage,
@@ -51,6 +55,15 @@ describe('block configuration ordering', () => {
     Object.defineProperty(window, 'vorchestra', {
       configurable: true,
       value: {
+        getUserModelCatalog: vi.fn().mockResolvedValue({
+          filePath: '/home/test/.vorchestra/models.json',
+          catalog: {
+            schemaVersion: 1,
+            codex: { models: [] },
+            cline: { models: [] },
+            agy: { models: [] },
+          },
+        }),
         openWorkflow: vi.fn(),
         saveWorkflow: vi.fn().mockResolvedValue({
           canceled: false,
@@ -153,11 +166,10 @@ describe('block configuration ordering', () => {
     expect(name).toHaveValue('Untitled workflow');
   });
 
-  it('copies, pastes, and duplicates selected blocks with fresh IDs', () => {
+  it('copies and pastes selected blocks with fresh IDs', () => {
     const { container, getByLabelText } = render(<App />);
     const copy = getByLabelText('Copy block');
     const paste = getByLabelText('Paste block');
-    const duplicate = getByLabelText('Duplicate block');
     const workflowName = getByLabelText('Workflow name');
 
     expect(paste).toBeDisabled();
@@ -170,9 +182,9 @@ describe('block configuration ordering', () => {
     expect(paste).toBeDisabled();
 
     fireEvent.click(copy);
-    expect(paste).toBeEnabled();
-    fireEvent.click(paste);
-    fireEvent.click(duplicate);
+    expect(getByLabelText('Paste block')).toBeEnabled();
+    fireEvent.click(getByLabelText('Paste block'));
+    fireEvent.click(getByLabelText('Paste block'));
 
     const ids = [
       ...container.querySelectorAll<HTMLElement>('.react-flow__node'),
@@ -415,6 +427,68 @@ describe('block configuration ordering', () => {
       expect(window.vorchestra.clearRunHistory).toHaveBeenCalled(),
     );
     expect(getByText('No retained runs for this workflow')).toBeInTheDocument();
+  });
+
+  it('presents Codex stderr as neutral session output', async () => {
+    const base = createWorkflow();
+    const agent = compileAgentBlock({
+      id: 'codex-agent',
+      name: 'Codex Agent',
+      agentRuntime: 'codex',
+      instruction: 'Return a concise response.',
+      authority: 'read-only',
+      textResponse: { portId: 'response', name: 'Response' },
+      filesystemOutputs: [],
+    });
+    const workflow = setAgentBlockPresentation(
+      { ...base, blocks: [agent], connections: [] },
+      agent.id,
+      'codex',
+    );
+    vi.mocked(window.vorchestra.openWorkflow).mockResolvedValue({
+      canceled: false,
+      filePath: '/tmp/codex.vorchestra.json',
+      workflow,
+    });
+    vi.mocked(window.vorchestra.listRunHistory).mockResolvedValue([
+      {
+        schemaVersion: 1,
+        runId: 'codex-run',
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        startedAt: '2026-07-10T01:00:00.000Z',
+        completedAt: '2026-07-10T01:00:01.000Z',
+        outcome: 'succeeded',
+        runInputs: {},
+        blocks: [
+          {
+            blockId: agent.id,
+            state: 'succeeded',
+            inputs: {},
+            artifacts: [],
+            stdout: 'final response',
+            stderr: 'OpenAI Codex v0.144.1\n',
+            exitCode: 0,
+          },
+        ],
+      },
+    ]);
+
+    const { getByLabelText, getByRole, getByText } = render(<App />);
+    fireEvent.click(getByLabelText('Open'));
+    const history = await waitFor(() =>
+      getByRole('region', { name: 'Local run history' }),
+    );
+    fireEvent.click(
+      await waitFor(() =>
+        within(history).getByRole('button', { name: /succeeded.*0 failed/i }),
+      ),
+    );
+    fireEvent.click(getByRole('tab', { name: /Run details/ }));
+
+    expect(getByText('Session output (stderr)')).toBeInTheDocument();
+    expect(getByLabelText('Copy session output')).toBeInTheDocument();
+    expect(getByText('OpenAI Codex v0.144.1')).not.toHaveClass('error-output');
   });
 
   it('supports keyboard tab navigation and traps focus in run review', async () => {

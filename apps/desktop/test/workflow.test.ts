@@ -106,6 +106,14 @@ describe('desktop workflow editing', () => {
       valid: true,
       issues: [],
     });
+
+    const pastedAtPointer = pasteProcessBlock(workflow, clipboard!, {
+      createId: () => 'pointer-paste',
+      position: { x: 320, y: 240 },
+    });
+    expect(
+      pastedAtPointer.workflow.layout?.blockPositions[pastedAtPointer.blockId],
+    ).toEqual({ x: 320, y: 240 });
   });
 
   it('duplicates a block through the same fresh-ID paste contract', () => {

@@ -64,7 +64,7 @@ pre,
 .app-shell {
   height: 100%;
   display: grid;
-  grid-template-rows: 54px 36px minmax(0, 1fr) 25px;
+  grid-template-rows: 54px minmax(0, 1fr) 25px;
   background: var(--bg);
 }
 
@@ -146,30 +146,6 @@ pre,
   align-items: center;
   gap: 3px;
   -webkit-app-region: no-drag;
-}
-.editor-toolbar {
-  position: relative;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  padding: 0 12px 0 279px;
-  border-bottom: 1px solid var(--line);
-  background: #0b0e13;
-}
-.editor-toolbar-label {
-  margin-right: 4px;
-  color: #596474;
-  font-size: 8px;
-  font-weight: 750;
-  letter-spacing: 0.13em;
-}
-.editor-toolbar .toolbar-button {
-  padding: 5px 7px;
-  font-size: 10px;
-}
-.editor-toolbar .toolbar-separator {
-  height: 18px;
 }
 .toolbar-button {
   position: relative;
@@ -464,6 +440,38 @@ pre,
 }
 .react-flow__node:focus {
   outline: none;
+}
+.node-action-toolbar {
+  display: flex;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid #3b4553;
+  border-radius: 6px;
+  background: #11161d;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.node-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 25px;
+  padding: 0;
+  border: 1px solid #2a333f;
+  border-radius: 4px;
+  background: #171d25;
+  color: #9aa6b5;
+  cursor: pointer;
+}
+.node-action-button:hover:not(:disabled),
+.node-action-button:focus-visible {
+  border-color: var(--amber-dim);
+  color: var(--amber);
+  outline: none;
+}
+.node-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 .process-node {
   width: 236px;
@@ -1791,6 +1799,12 @@ select:hover {
 .data-section > pre.error-output {
   color: #d28c8c;
 }
+.stream-note {
+  margin: 13px 0 -5px;
+  color: #768291;
+  font-size: 8px;
+  line-height: 1.5;
+}
 .artifact-view {
   margin-bottom: 5px;
   border: 1px solid #252c35;
@@ -2101,9 +2115,6 @@ select:hover {
   }
   .topbar {
     grid-template-columns: 215px minmax(120px, 1fr) auto;
-  }
-  .editor-toolbar {
-    padding-left: 239px;
   }
   .brand em {
     display: none;

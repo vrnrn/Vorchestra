@@ -15,6 +15,7 @@ import { startWorkflowRun } from '../src/main/runtime';
 import { WorktreeRuntime } from '../src/main/worktree-runtime';
 import { createWorkflow } from '../src/shared/defaults';
 import {
+  CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
   compileAgentBlock,
   setAgentBlockPresentation,
   type AgentBlockEditorConfig,
@@ -36,7 +37,7 @@ describe('Agent worktree coordinator', () => {
   it('creates one shared scope and rewrites ordered Agent working directories', async () => {
     const fixture = await repository();
     const first = agent('first', 'codex', 'workspace-write');
-    const second = agent('second', 'cline', 'workspace-write', true);
+    const second = agent('second', 'antigravity', 'workspace-write', true);
     let workflow = {
       ...createWorkflow(),
       blocks: [first, second],
@@ -52,7 +53,7 @@ describe('Agent worktree coordinator', () => {
       workflow = setAgentBlockPresentation(
         workflow,
         block.id,
-        block.id === first.id ? 'codex' : 'cline',
+        block.id === first.id ? 'codex' : 'antigravity',
         {
           mode: 'workflow-run-worktree',
           repositoryRoot: fixture.repositoryPath,
@@ -89,6 +90,12 @@ describe('Agent worktree coordinator', () => {
     ).toEqual([
       prepared.scopes[0]!.worktreePath,
       prepared.scopes[0]!.worktreePath,
+    ]);
+    expect(
+      prepared.workflow.blocks[1]!.invocation.arguments.slice(0, 2),
+    ).toEqual([
+      { type: 'literal', value: '--add-dir' },
+      { type: 'literal', value: prepared.scopes[0]!.worktreePath },
     ]);
     expect(
       applyAgentWorktreePreviews(
@@ -290,7 +297,15 @@ function agent(
     instruction: `Run ${id}.`,
     authority,
     ...(withContext
-      ? { textContext: { portId: 'context', name: 'Context' } }
+      ? {
+          textContext: { portId: 'context', name: 'Context' },
+          ...(agentRuntime === 'codex'
+            ? {}
+            : {
+                instructionDelivery: 'template' as const,
+                instructionTemplate: CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+              }),
+        }
       : {}),
     textResponse: { portId: 'response', name: 'Response' },
     filesystemOutputs: [],

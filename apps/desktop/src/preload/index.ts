@@ -9,10 +9,15 @@ import {
   type SelectFilesystemPathRequest,
   type SelectFilesystemPathResult,
   type VorchestraBridge,
+  type UserModelCatalogResult,
   type WorkflowFileResult,
 } from '../shared/contracts.js';
 
 const bridge: VorchestraBridge = {
+  getUserModelCatalog: () =>
+    ipcRenderer.invoke(
+      IPC_CHANNELS.getUserModelCatalog,
+    ) as Promise<UserModelCatalogResult>,
   openWorkflow: () =>
     ipcRenderer.invoke(
       IPC_CHANNELS.openWorkflow,

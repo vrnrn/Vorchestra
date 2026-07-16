@@ -43,6 +43,20 @@ npm run verify
 npm run dev
 ```
 
+## User model settings
+
+Vorchestra reads the machine-local model catalog from
+`~/.vorchestra/models.json`. The file contains `codex`, `cline`, and `agy`
+entries; each entry has a `models` array and an optional `default` that must
+match one item in that array. Configured models appear in the Agent model
+selector, while **Custom** accepts an exact runtime-owned identifier.
+
+Model identifiers and defaults are user settings, not compiled application
+constants. They are never inferred from provider APIs or added to portable
+workflow files unless a block explicitly selects a model. When a block has no
+explicit model, its tool's machine-local `default` is applied during preflight
+and execution.
+
 ## Commands
 
 - `npm run build` compiles every workspace.

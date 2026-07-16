@@ -2,6 +2,7 @@ import {
   parseWorkflowDefinition,
   type WorkflowDefinition,
 } from '@vorchestra/engine';
+import { normalizeAgentRuntimeWorkflow } from '../../shared/agent-runtime';
 
 export const workflowDraftStorageKey = 'vorchestra:workflow-draft:v1';
 
@@ -29,7 +30,9 @@ export function readWorkflowDraft(
       storage.removeItem(workflowDraftStorageKey);
       return undefined;
     }
-    const workflow = parseWorkflowDefinition(input.workflow);
+    const workflow = normalizeAgentRuntimeWorkflow(
+      parseWorkflowDefinition(input.workflow),
+    ).workflow;
     return {
       schemaVersion: 1,
       workflow,

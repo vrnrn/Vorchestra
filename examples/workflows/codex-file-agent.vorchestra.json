@@ -58,6 +58,10 @@
           },
           {
             "type": "literal",
+            "value": "--skip-git-repo-check"
+          },
+          {
+            "type": "literal",
             "value": "--sandbox"
           },
           {

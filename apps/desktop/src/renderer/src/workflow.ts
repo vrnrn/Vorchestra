@@ -16,6 +16,7 @@ export interface ProcessBlockClipboard {
 export interface PasteProcessBlockOptions {
   readonly createId?: () => string;
   readonly offset?: { readonly x: number; readonly y: number };
+  readonly position?: { readonly x: number; readonly y: number };
 }
 
 export interface PastedProcessBlock {
@@ -108,8 +109,10 @@ export function pasteProcessBlock(
   const block = cloneProcessBlock(clipboard.block, blockId);
   const position = availablePastePosition(
     workflow,
-    clipboard.sourcePosition,
-    options.offset ?? defaultPasteOffset,
+    options.position ?? clipboard.sourcePosition,
+    options.position === undefined
+      ? (options.offset ?? defaultPasteOffset)
+      : { x: 0, y: 0 },
   );
 
   return {
@@ -539,14 +542,14 @@ function availablePastePosition(
   source: { readonly x: number; readonly y: number },
   offset: { readonly x: number; readonly y: number },
 ): { x: number; y: number } {
-  const displacement =
-    offset.x === 0 && offset.y === 0 ? defaultPasteOffset : offset;
+  const exactPosition = offset.x === 0 && offset.y === 0;
+  const displacement = exactPosition ? defaultPasteOffset : offset;
   const occupied = new Set(
     Object.values(workflow.layout?.blockPositions ?? {}).map(
       (position) => `${position.x}:${position.y}`,
     ),
   );
-  let multiplier = 1;
+  let multiplier = exactPosition ? 0 : 1;
   while (true) {
     const position = {
       x: source.x + displacement.x * multiplier,

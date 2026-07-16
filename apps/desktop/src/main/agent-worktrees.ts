@@ -5,6 +5,7 @@ import type {
   WorkflowDefinition,
 } from '@vorchestra/engine';
 import {
+  alignAgentRuntimeWorkingDirectories,
   agentEditorConfigFromBlock,
   getAgentBlockMetadataIssue,
   getAgentBlockPresentation,
@@ -210,7 +211,7 @@ export async function prepareAgentWorktrees(
     created.map((scope) => [scope.scopeId, scope.worktreePath] as const),
   );
   return {
-    workflow: {
+    workflow: alignAgentRuntimeWorkingDirectories({
       ...workflow,
       blocks: workflow.blocks.map((block) => {
         const presentation = getAgentBlockPresentation(workflow, block.id);
@@ -227,7 +228,7 @@ export async function prepareAgentWorktrees(
           },
         };
       }),
-    },
+    }),
     scopes: created,
   };
 }

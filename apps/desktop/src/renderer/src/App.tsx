@@ -7,10 +7,12 @@ import {
   type ChangeEvent,
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import {
   Background,
   BackgroundVariant,
+  ControlButton,
   Controls,
   MiniMap,
   ReactFlow,
@@ -20,6 +22,8 @@ import {
   type EdgeChange,
   type NodeChange,
   type OnNodeDrag,
+  type NodeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import {
   parseWorkflowRunInputs,
@@ -43,12 +47,10 @@ import {
   Check,
   ChevronRight,
   CircleStop,
-  ClipboardPaste,
   Clock3,
   Copy,
   FileCode2,
   FileInput,
-  Files,
   FolderOpen,
   GitBranch,
   GripVertical,
@@ -74,6 +76,7 @@ import type {
   BlockRunSnapshot,
   DesktopRunEvent,
   RunHistoryRecord,
+  UserModelCatalogResult,
 } from '../../shared/contracts';
 import {
   AGENT_RUNTIME_REGISTRY,
@@ -81,8 +84,10 @@ import {
   compileAgentBlock,
   getAgentBlockMetadataIssue,
   getAgentBlockPresentation,
+  normalizeAgentRuntimeWorkflow,
   removeBlockPresentation,
   setAgentBlockPresentation,
+  withResolvedAgentWorkingDirectory,
   type AgentBlockMetadataIssue,
   type AgentBlockPresentation,
   type AgentRuntimeId,
@@ -110,7 +115,6 @@ import {
   connectBlocks,
   copyProcessBlock,
   createWorkflowHistory,
-  duplicateProcessBlock,
   moveListItem,
   moveRecordEntry,
   pasteProcessBlock,
@@ -127,7 +131,6 @@ import {
   type WorkflowHistory,
 } from './workflow';
 
-const nodeTypes = { process: ProcessNode };
 type InspectorTab = 'configure' | 'run';
 type ReorderGroup = 'arguments' | 'inputs' | 'outputs' | 'environment';
 type ReorderLocation = { group: ReorderGroup; index: number };
@@ -152,6 +155,15 @@ export function App() {
   const [historyBaselineDirty, setHistoryBaselineDirty] = useState(
     recoveredDraft !== undefined,
   );
+  const canvasRef = useRef<HTMLElement>(null);
+  const reactFlowInstanceRef = useRef<ReactFlowInstance<
+    ProcessFlowNode,
+    Edge
+  > | null>(null);
+  const lastCanvasPointerRef = useRef<{
+    readonly x: number;
+    readonly y: number;
+  } | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string>(
     workflow.blocks[0]?.id ?? '',
   );
@@ -178,6 +190,8 @@ export function App() {
   const [selectedRunId, setSelectedRunId] = useState<string>();
   const [inspectorFocusRequest, setInspectorFocusRequest] =
     useState<InspectorFocusRequest>();
+  const [userModelCatalog, setUserModelCatalog] =
+    useState<UserModelCatalogResult>();
   const [notice, setNotice] = useState<string | undefined>(
     recoveredDraft === undefined ? undefined : 'Recovered unsaved draft.',
   );
@@ -268,19 +282,46 @@ export function App() {
     if (next !== history) restoreHistory(next);
   }, [history, restoreHistory]);
 
+  const copyBlock = useCallback(
+    (blockId: string): void => {
+      const copied = copyProcessBlock(workflow, blockId);
+      if (copied === undefined) return;
+      setBlockClipboard(copied);
+      setBlockClipboardPresentation(
+        getAgentBlockPresentation(workflow, blockId),
+      );
+      setNotice(`Copied ${copied.block.name}.`);
+    },
+    [workflow],
+  );
+
   const copySelectedBlock = useCallback((): void => {
-    const copied = copyProcessBlock(workflow, selectedBlockId);
-    if (copied === undefined) return;
-    setBlockClipboard(copied);
-    setBlockClipboardPresentation(
-      getAgentBlockPresentation(workflow, selectedBlockId),
-    );
-    setNotice(`Copied ${copied.block.name}.`);
-  }, [selectedBlockId, workflow]);
+    copyBlock(selectedBlockId);
+  }, [copyBlock, selectedBlockId]);
+
+  const getPastePosition = useCallback(() => {
+    const reactFlow = reactFlowInstanceRef.current;
+    if (reactFlow === null) return undefined;
+    if (lastCanvasPointerRef.current !== null) {
+      return reactFlow.screenToFlowPosition(lastCanvasPointerRef.current);
+    }
+    const canvas = canvasRef.current;
+    if (canvas === null) return undefined;
+    const bounds = canvas.getBoundingClientRect();
+    return reactFlow.screenToFlowPosition({
+      x: bounds.left + bounds.width / 2,
+      y: bounds.top + bounds.height / 2,
+    });
+  }, []);
 
   const pasteCopiedBlock = useCallback((): void => {
     if (blockClipboard === undefined) return;
-    const pasted = pasteProcessBlock(workflow, blockClipboard);
+    const position = getPastePosition();
+    const pasted = pasteProcessBlock(
+      workflow,
+      blockClipboard,
+      position === undefined ? {} : { position },
+    );
     const nextWorkflow =
       blockClipboardPresentation === undefined
         ? pasted.workflow
@@ -295,27 +336,27 @@ export function App() {
     setInspectorTab('configure');
     setDirty(true);
     setNotice(`Pasted ${blockClipboard.block.name}.`);
-  }, [blockClipboard, blockClipboardPresentation, history, workflow]);
+  }, [
+    blockClipboard,
+    blockClipboardPresentation,
+    getPastePosition,
+    history,
+    workflow,
+  ]);
 
-  const duplicateSelectedBlock = useCallback((): void => {
-    const duplicated = duplicateProcessBlock(workflow, selectedBlockId);
-    if (duplicated === undefined) return;
-    const presentation = getAgentBlockPresentation(workflow, selectedBlockId);
-    const nextWorkflow =
-      presentation === undefined
-        ? duplicated.workflow
-        : setAgentBlockPresentation(
-            duplicated.workflow,
-            duplicated.blockId,
-            presentation.agentRuntime,
-            presentation.isolation,
-          );
-    setHistory(pushWorkflowHistory(history, nextWorkflow));
-    setSelectedBlockId(duplicated.blockId);
-    setInspectorTab('configure');
-    setDirty(true);
-    setNotice('Block duplicated.');
-  }, [history, selectedBlockId, workflow]);
+  const nodeTypes = useMemo(
+    () => ({
+      process: (props: NodeProps<ProcessFlowNode>) => (
+        <ProcessNode
+          {...props}
+          onCopy={() => copyBlock(props.id)}
+          onPaste={pasteCopiedBlock}
+          pasteDisabled={blockClipboard === undefined}
+        />
+      ),
+    }),
+    [blockClipboard, copyBlock, pasteCopiedBlock],
+  );
 
   const autoArrange = useCallback((): void => {
     const arranged = autoArrangeWorkflow(workflow);
@@ -331,6 +372,24 @@ export function App() {
     setDirty(true);
     setNotice('Workflow arranged.');
   }, [history, snapshots, workflow]);
+
+  useEffect(() => {
+    let active = true;
+    void window.vorchestra
+      .getUserModelCatalog()
+      .then((result) => {
+        if (!active) return;
+        setUserModelCatalog(result);
+        if (result.issue !== undefined) setNotice(result.issue);
+      })
+      .catch((error: unknown) => {
+        if (active)
+          setNotice(`Could not load model settings: ${errorMessage(error)}`);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     return window.vorchestra.onRunEvent((event: DesktopRunEvent) => {
@@ -469,14 +528,10 @@ export function App() {
         event.preventDefault();
         pasteCopiedBlock();
       }
-      if (key === 'd') {
-        event.preventDefault();
-        duplicateSelectedBlock();
-      }
     };
     window.addEventListener('keydown', keyDown);
     return () => window.removeEventListener('keydown', keyDown);
-  }, [copySelectedBlock, duplicateSelectedBlock, pasteCopiedBlock, redo, undo]);
+  }, [copySelectedBlock, pasteCopiedBlock, redo, undo]);
 
   useEffect(() => {
     setNodes((current) =>
@@ -484,9 +539,12 @@ export function App() {
         workflow,
         current,
         (blockId) => snapshots[blockId]?.state ?? 'idle',
-      ),
+      ).map((node) => {
+        const selected = node.id === selectedBlockId;
+        return node.selected === selected ? node : { ...node, selected };
+      }),
     );
-  }, [snapshots, workflow]);
+  }, [selectedBlockId, snapshots, workflow]);
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -538,6 +596,25 @@ export function App() {
       );
     },
     [changeWorkflow],
+  );
+
+  const onCanvasPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLElement>): void => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest('.react-flow__node-toolbar') !== null
+      ) {
+        return;
+      }
+      const reactFlow = reactFlowInstanceRef.current;
+      if (reactFlow === null) return;
+      lastCanvasPointerRef.current = {
+        x: event.clientX,
+        y: event.clientY,
+      };
+    },
+    [],
   );
 
   const onEdgesChange = useCallback(
@@ -607,6 +684,9 @@ export function App() {
       name: 'AI Agent',
       agentRuntime: 'codex',
       instruction: 'Complete the requested task and return a concise response.',
+      ...(userModelCatalog?.catalog.codex.default === undefined
+        ? {}
+        : { model: userModelCatalog.catalog.codex.default }),
       authority: 'read-only',
       textContext: { portId: 'context', name: 'Context' },
       textResponse: { portId: 'response', name: 'Response' },
@@ -667,10 +747,11 @@ export function App() {
     try {
       const result = await window.vorchestra.openWorkflow();
       if (result.canceled || result.workflow === undefined) return;
-      resetCanvasWorkflow(result.workflow);
+      const normalized = normalizeAgentRuntimeWorkflow(result.workflow);
+      resetCanvasWorkflow(normalized.workflow);
       setFilePath(result.filePath);
-      setHistoryBaselineDirty(false);
-      setDirty(false);
+      setHistoryBaselineDirty(normalized.migratedBlockIds.length > 0);
+      setDirty(normalized.migratedBlockIds.length > 0);
       clearWorkflowDraft();
       setSnapshots({});
       setRunOutcome(undefined);
@@ -679,8 +760,12 @@ export function App() {
       setBlockClipboardPresentation(undefined);
       setRunInputValues({});
       setSelectedRunId(undefined);
-      setSelectedBlockId(result.workflow.blocks[0]?.id ?? '');
-      setNotice('Workflow opened.');
+      setSelectedBlockId(normalized.workflow.blocks[0]?.id ?? '');
+      setNotice(
+        normalized.migratedBlockIds.length > 0
+          ? 'Workflow opened. Updated legacy Cline context delivery; save to keep the repair.'
+          : 'Workflow opened.',
+      );
     } catch (error) {
       setNotice(`Could not open workflow: ${errorMessage(error)}`);
     }
@@ -844,44 +929,6 @@ export function App() {
         </div>
       </header>
 
-      <div
-        className="editor-toolbar"
-        role="toolbar"
-        aria-label="Block and canvas controls"
-      >
-        <span className="editor-toolbar-label">BLOCK</span>
-        <ToolbarButton
-          icon={<Copy size={15} />}
-          label="Copy block"
-          title="Copy selected block (Cmd/Ctrl-C)"
-          disabled={selectedBlock === undefined}
-          onClick={copySelectedBlock}
-        />
-        <ToolbarButton
-          icon={<ClipboardPaste size={15} />}
-          label="Paste block"
-          title="Paste copied block (Cmd/Ctrl-V)"
-          disabled={blockClipboard === undefined}
-          onClick={pasteCopiedBlock}
-        />
-        <ToolbarButton
-          icon={<Files size={15} />}
-          label="Duplicate block"
-          title="Duplicate selected block (Cmd/Ctrl-D)"
-          disabled={selectedBlock === undefined}
-          onClick={duplicateSelectedBlock}
-        />
-        <span className="toolbar-separator" />
-        <span className="editor-toolbar-label">CANVAS</span>
-        <ToolbarButton
-          icon={<Network size={15} />}
-          label="Auto arrange"
-          title="Arrange workflow by dependency layer"
-          disabled={workflow.blocks.length === 0}
-          onClick={autoArrange}
-        />
-      </div>
-
       <section className="workspace">
         <aside className="rail">
           <button
@@ -1003,7 +1050,12 @@ export function App() {
           </div>
         </aside>
 
-        <section className="canvas" aria-label="Workflow canvas">
+        <section
+          ref={canvasRef}
+          className="canvas"
+          aria-label="Workflow canvas"
+          onPointerMove={onCanvasPointerMove}
+        >
           <div className="canvas-label">
             <span>CANVAS</span>
             <ChevronRight size={12} />
@@ -1014,6 +1066,9 @@ export function App() {
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
+            onInit={(instance) => {
+              reactFlowInstanceRef.current = instance;
+            }}
             onNodesChange={onNodesChange}
             onNodeDragStop={onNodeDragStop}
             onEdgesChange={onEdgesChange}
@@ -1045,7 +1100,20 @@ export function App() {
                 statusColor(snapshots[node.id]?.state ?? 'idle')
               }
             />
-            <Controls className="flow-controls" showInteractive={false} />
+            <Controls
+              className="flow-controls"
+              aria-label="Canvas controls"
+              showInteractive={false}
+            >
+              <ControlButton
+                aria-label="Auto arrange"
+                title="Arrange workflow by dependency layer"
+                disabled={workflow.blocks.length === 0}
+                onClick={autoArrange}
+              >
+                <Network size={14} />
+              </ControlButton>
+            </Controls>
           </ReactFlow>
           {workflow.blocks.length === 0 && (
             <div className="empty-canvas">
@@ -1208,6 +1276,12 @@ export function App() {
                       block={selectedBlock}
                       presentation={selectedPresentation}
                       selectPath={selectFilesystemPath}
+                      {...(userModelCatalog === undefined
+                        ? {}
+                        : {
+                            modelCatalog: userModelCatalog.catalog,
+                            modelCatalogPath: userModelCatalog.filePath,
+                          })}
                       onChange={(block, presentation) =>
                         changeWorkflow((current) =>
                           setAgentBlockPresentation(
@@ -1225,6 +1299,9 @@ export function App() {
                     {...(snapshots[selectedBlock.id] === undefined
                       ? {}
                       : { snapshot: snapshots[selectedBlock.id] })}
+                    {...(selectedPresentation?.agentRuntime === undefined
+                      ? {}
+                      : { agentRuntime: selectedPresentation.agentRuntime })}
                     onCopy={(value, label) =>
                       void copyToClipboard(value, label)
                     }
@@ -2292,11 +2369,13 @@ function EnvironmentRow({
 
 function RunInspector({
   snapshot,
+  agentRuntime,
   onCopy,
   onReveal,
   onNavigateFailure,
 }: {
   snapshot?: BlockRunSnapshot;
+  agentRuntime?: AgentRuntimeId;
   onCopy: (value: string, label: string) => void;
   onReveal: (path: string) => void;
   onNavigateFailure: (failure: ExecutionFailure) => void;
@@ -2419,20 +2498,41 @@ function RunInspector({
       >
         <pre>{snapshot.stdout || 'No stdout captured.'}</pre>
       </DataSection>
+      {agentRuntime === 'codex' && snapshot.stderr && (
+        <p className="stream-note">
+          Codex writes progress and session metadata to stderr. It is shown as
+          session output here; the block state and failure details identify
+          actual run failures.
+        </p>
+      )}
       <DataSection
-        title="stderr"
+        title={agentRuntime === 'codex' ? 'Session output (stderr)' : 'stderr'}
         action={
           <button
             className="icon-button"
-            aria-label="Copy stderr"
-            onClick={() => onCopy(snapshot.stderr, 'stderr')}
+            aria-label={
+              agentRuntime === 'codex' ? 'Copy session output' : 'Copy stderr'
+            }
+            onClick={() =>
+              onCopy(
+                snapshot.stderr,
+                agentRuntime === 'codex' ? 'Session output' : 'stderr',
+              )
+            }
           >
             <Copy size={13} />
           </button>
         }
       >
-        <pre className={snapshot.stderr ? 'error-output' : ''}>
-          {snapshot.stderr || 'No stderr captured.'}
+        <pre
+          className={
+            snapshot.stderr && agentRuntime !== 'codex' ? 'error-output' : ''
+          }
+        >
+          {snapshot.stderr ||
+            (agentRuntime === 'codex'
+              ? 'No session output captured.'
+              : 'No stderr captured.')}
         </pre>
       </DataSection>
       <DataSection title="Process result">
@@ -2603,7 +2703,8 @@ function RunPreview({
               </span>
               <div>
                 <strong>{block.name}</strong>
-                <InvocationPreview
+                <RunInvocationPreview
+                  workflow={workflow}
                   block={block}
                   {...(preflight?.blocks.find(
                     (preview) => preview.blockId === block.id,
@@ -2648,6 +2749,33 @@ function RunPreview({
         </footer>
       </section>
     </div>
+  );
+}
+
+function RunInvocationPreview({
+  workflow,
+  block,
+  resolved,
+}: {
+  workflow: WorkflowDefinition;
+  block: ProcessBlock;
+  resolved?: BlockPreflightPreview;
+}) {
+  const workingDirectory =
+    resolved?.workingDirectory ?? block.invocation.workingDirectory;
+  const effectiveBlock =
+    workingDirectory === undefined
+      ? block
+      : withResolvedAgentWorkingDirectory(
+          block,
+          getAgentBlockPresentation(workflow, block.id),
+          workingDirectory,
+        );
+  return (
+    <InvocationPreview
+      block={effectiveBlock}
+      {...(resolved === undefined ? {} : { resolved })}
+    />
   );
 }
 

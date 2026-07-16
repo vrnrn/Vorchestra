@@ -88,21 +88,33 @@ describe('AI Agent block editor', () => {
     });
   });
 
-  it('exposes explicit runtime-default and exact model override states', () => {
+  it('offers configured models, applies the file default, and allows custom IDs', () => {
     const onChange = vi.fn();
-    const withModel = { ...config(), model: 'gpt-5.6-luna' };
-    const { getByLabelText } = render(
+    const { getByLabelText, getByRole } = render(
       <AgentBlockInspector
-        block={compileAgentBlock(withModel)}
+        block={compileAgentBlock(config())}
         presentation={{ kind: 'ai-agent', agentRuntime: 'codex' }}
         onChange={onChange}
         selectPath={vi.fn()}
+        modelCatalog={{
+          schemaVersion: 1,
+          codex: {
+            default: 'test/default-model',
+            models: ['test/default-model', 'test/fast-model'],
+          },
+          cline: { models: [] },
+          agy: { models: [] },
+        }}
+        modelCatalogPath="/home/test/.vorchestra/models.json"
       />,
     );
 
-    expect(getByLabelText('Agent model source')).toHaveValue('override');
-    fireEvent.change(getByLabelText('Agent model override'), {
-      target: { value: 'gpt-5.6-luna-high' },
+    expect(getByLabelText('Agent model')).toHaveValue('configured:0');
+    expect(
+      getByRole('region', { name: 'Exact invocation preview' }),
+    ).toHaveTextContent('test/default-model');
+    fireEvent.change(getByLabelText('Agent model'), {
+      target: { value: 'configured:1' },
     });
     expect(
       onChange.mock.calls
@@ -110,10 +122,27 @@ describe('AI Agent block editor', () => {
         .invocation.arguments.map(
           (argument: { type: string; value?: string }) => argument.value,
         ),
-    ).toContain('gpt-5.6-luna-high');
+    ).toContain('test/fast-model');
+    expect(getByRole('option', { name: 'Custom…' })).toBeInTheDocument();
 
-    fireEvent.change(getByLabelText('Agent model source'), {
-      target: { value: 'default' },
+    cleanup();
+    const custom = render(
+      <AgentBlockInspector
+        block={compileAgentBlock({ ...config(), model: 'custom/initial' })}
+        presentation={{ kind: 'ai-agent', agentRuntime: 'codex' }}
+        onChange={onChange}
+        selectPath={vi.fn()}
+        modelCatalog={{
+          schemaVersion: 1,
+          codex: { models: ['test/default-model'] },
+          cline: { models: [] },
+          agy: { models: [] },
+        }}
+      />,
+    );
+    expect(custom.getByLabelText('Agent model')).toHaveValue('custom');
+    fireEvent.change(custom.getByLabelText('Agent model override'), {
+      target: { value: 'custom/exact-model' },
     });
     expect(
       onChange.mock.calls
@@ -121,7 +150,7 @@ describe('AI Agent block editor', () => {
         .invocation.arguments.map(
           (argument: { type: string; value?: string }) => argument.value,
         ),
-    ).not.toContain('--model');
+    ).toContain('custom/exact-model');
   });
 
   it('renders capability-driven instruction delivery and context controls', () => {
@@ -153,7 +182,15 @@ describe('AI Agent block editor', () => {
     fireEvent.change(getByLabelText('Agent runtime'), {
       target: { value: 'antigravity' },
     });
-    expect(onChange.mock.calls.at(-1)?.[0].inputs).toEqual([]);
+    const converted = onChange.mock.calls.at(-1)?.[0];
+    expect(converted.inputs).toContainEqual(
+      expect.objectContaining({ id: 'context', name: 'Reference material' }),
+    );
+    expect(converted.invocation.stdin).toBeUndefined();
+    expect(converted.invocation.arguments.at(-1)).toMatchObject({
+      type: 'template',
+      inputs: { context: { portId: 'context' } },
+    });
   });
 
   it('edits a visible deterministic template that binds exact instruction and context', () => {

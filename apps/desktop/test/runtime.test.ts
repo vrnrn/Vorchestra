@@ -353,6 +353,7 @@ describe('desktop runtime projection', () => {
     expect(request?.arguments).toEqual([
       'exec',
       '--ephemeral',
+      '--skip-git-repo-check',
       '--sandbox',
       'read-only',
       '--color',

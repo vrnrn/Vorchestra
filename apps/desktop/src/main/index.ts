@@ -3,6 +3,11 @@ import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { parseRunnableWorkflow } from '../shared/authority.js';
 import {
+  alignAgentRuntimeWorkingDirectories,
+  applyUserModelDefaults,
+  normalizeAgentRuntimeWorkflow,
+} from '../shared/agent-runtime.js';
+import {
   parseWorkflowDefinition,
   parseWorkflowRunInputs,
   preflightWorkflow,
@@ -31,6 +36,7 @@ import { ActiveRunRegistry } from './run-registry.js';
 import { RunHistoryStore } from './run-history.js';
 import { readWorkflowFile, writeWorkflowFile } from './workflow-files.js';
 import { applyApplicationIdentity } from './application-identity.js';
+import { loadUserModelCatalog } from './model-catalog.js';
 import {
   applyAgentWorktreePreviews,
   finalizeAgentWorktrees,
@@ -91,6 +97,9 @@ app.on('window-all-closed', () => {
 });
 
 function registerIpc(runHistory: RunHistoryStore): void {
+  ipcMain.handle(IPC_CHANNELS.getUserModelCatalog, () =>
+    loadUserModelCatalog(app.getPath('home')),
+  );
   ipcMain.handle(
     IPC_CHANNELS.openWorkflow,
     async (): Promise<WorkflowFileResult> => {
@@ -217,9 +226,17 @@ function registerIpc(runHistory: RunHistoryStore): void {
         request.workflowFilePath,
         app.getPath('home'),
       );
-      const workflow = applyDefaultWorkingDirectory(
-        parseWorkflowDefinition(request.workflow),
-        baseDirectory,
+      const modelCatalog = await loadUserModelCatalog(app.getPath('home'));
+      const workflow = alignAgentRuntimeWorkingDirectories(
+        applyDefaultWorkingDirectory(
+          applyUserModelDefaults(
+            normalizeAgentRuntimeWorkflow(
+              parseWorkflowDefinition(request.workflow),
+            ).workflow,
+            modelCatalog.catalog,
+          ),
+          baseDirectory,
+        ),
       );
       const runInputs = parseWorkflowRunInputs(request.runInputs ?? {});
       const generic = await preflightWorkflow(
@@ -251,9 +268,19 @@ function registerIpc(runHistory: RunHistoryStore): void {
       request.workflowFilePath,
       app.getPath('home'),
     );
-    const configuredWorkflow = applyDefaultWorkingDirectory(
-      parseRunnableWorkflow(request.workflow),
-      baseDirectory,
+    const modelCatalog = await loadUserModelCatalog(app.getPath('home'));
+    const configuredWorkflow = alignAgentRuntimeWorkingDirectories(
+      applyDefaultWorkingDirectory(
+        parseRunnableWorkflow(
+          applyUserModelDefaults(
+            normalizeAgentRuntimeWorkflow(
+              parseWorkflowDefinition(request.workflow),
+            ).workflow,
+            modelCatalog.catalog,
+          ),
+        ),
+        baseDirectory,
+      ),
     );
     const runInputs = parseWorkflowRunInputs(request.runInputs ?? {});
     const runId = requestedRunId(request.runId);

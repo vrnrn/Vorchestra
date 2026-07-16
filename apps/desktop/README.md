@@ -19,6 +19,9 @@ Electron host and React canvas for the v0.3 local workflow experience.
 - Saved files contain only the versioned workflow definition. Canvas positions
   live in `workflow.layout`; retained run snapshots are sensitive local
   application data and never enter portable workflow files.
+- Model choices are loaded through the main/preload boundary from the user-owned
+  `~/.vorchestra/models.json`. No provider model list is compiled into the
+  desktop application.
 
 ## Integration assumptions
 

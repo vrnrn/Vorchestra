@@ -23,6 +23,7 @@
         "arguments": [
           { "type": "literal", "value": "exec" },
           { "type": "literal", "value": "--ephemeral" },
+          { "type": "literal", "value": "--skip-git-repo-check" },
           { "type": "literal", "value": "--sandbox" },
           { "type": "literal", "value": "workspace-write" },
           { "type": "literal", "value": "--color" },
@@ -72,15 +73,20 @@
         "executable": "cline",
         "arguments": [
           {
-            "type": "literal",
-            "value": "Review generated/draft.md against the repository, improve it, and write generated/reviewed.md. Do not commit. Respond with a one-sentence handoff."
+            "type": "template",
+            "template": "{{instruction}}\n\nConnected context:\n{{context}}",
+            "inputs": {
+              "instruction": {
+                "value": "Review generated/draft.md against the repository, improve it, and write generated/reviewed.md. Do not commit. Respond with a one-sentence handoff."
+              },
+              "context": { "portId": "context" }
+            }
           }
         ],
         "environment": {
           "HOME": { "source": "host", "name": "HOME" },
           "PATH": { "source": "host", "name": "PATH" }
         },
-        "stdin": { "portId": "context" },
         "shell": false,
         "outputs": [
           { "type": "stdout", "portId": "response" },
