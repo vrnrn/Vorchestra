@@ -7,13 +7,21 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import type { BlockExecutionState, ProcessBlock } from '@vorchestra/engine';
-import { Bot, Box, ClipboardPaste, Copy, TerminalSquare } from 'lucide-react';
+import {
+  Bot,
+  Box,
+  ClipboardPaste,
+  Copy,
+  MonitorUp,
+  TerminalSquare,
+} from 'lucide-react';
 import type { AgentRuntimeId } from '../../shared/agent-runtime';
 
 export interface ProcessNodeData extends Record<string, unknown> {
   readonly block: ProcessBlock;
   readonly status: BlockExecutionState | 'idle';
   readonly agentRuntime?: AgentRuntimeId;
+  readonly presentationKind?: 'computer-use';
 }
 
 export type ProcessFlowNode = Node<ProcessNodeData, 'process'>;
@@ -31,7 +39,13 @@ export const ProcessNode = memo(function ProcessNode({
   onPaste,
   pasteDisabled,
 }: NodeProps<ProcessFlowNode> & ProcessNodeActions) {
-  const { agentRuntime, block, status } = data;
+  const { agentRuntime, block, presentationKind, status } = data;
+  const blockType =
+    presentationKind === 'computer-use'
+      ? 'Computer Use'
+      : agentRuntime === undefined
+        ? 'Process'
+        : 'AI Agent';
   return (
     <>
       <NodeToolbar
@@ -67,12 +81,14 @@ export const ProcessNode = memo(function ProcessNode({
       </NodeToolbar>
       <article
         className={`process-node state-${status} ${selected ? 'selected' : ''}`}
-        aria-label={`${agentRuntime === undefined ? 'Process' : 'AI Agent'} ${block.name}, ${status}`}
+        aria-label={`${blockType} ${block.name}, ${status}`}
       >
         <div className="node-accent" />
         <header>
           <span className="node-icon">
-            {agentRuntime === undefined ? (
+            {presentationKind === 'computer-use' ? (
+              <MonitorUp size={14} />
+            ) : agentRuntime === undefined ? (
               <TerminalSquare size={14} />
             ) : (
               <Bot size={14} />
@@ -89,6 +105,9 @@ export const ProcessNode = memo(function ProcessNode({
           <code>{block.invocation.executable}</code>
           {agentRuntime !== undefined && (
             <span className="agent-runtime-pill">{agentRuntime}</span>
+          )}
+          {presentationKind === 'computer-use' && (
+            <span className="agent-runtime-pill">codex + MCP</span>
           )}
           {block.invocation.shell && <span className="shell-pill">shell</span>}
         </div>

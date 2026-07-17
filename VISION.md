@@ -5,9 +5,9 @@
 ## Status and purpose
 
 - **Status:** Living product vision
-- **Last updated:** 2026-07-09
-- **Current horizon:** v0.3 capability-aware Codex, Cline, and Antigravity Agent
-  runtimes with explicit worktree isolation
+- **Last updated:** 2026-07-16
+- **Current horizon:** v0.4 bounded Computer Use and read-only market-research
+  workflows with a proposal-only decision artifact
 
 This document is Vorchestra's durable product compass. It records the problem we
 are solving, the product boundaries, and the decisions that should guide design
@@ -236,6 +236,50 @@ v0.1 includes:
 - Per-block input, output, and failure inspection
 - Local save and load using a versioned workflow format
 
+## v0.4 current horizon
+
+v0.4 proves that Vorchestra can coordinate a useful, evidence-bearing research
+workflow across local CLIs and browser-operated applications without turning the
+engine into a catalog of SaaS integrations.
+
+The reference workflow has six independent research branches:
+
+- read-only Reddit and X research through pinned, locally audited CLI builds;
+- Perplexity Finance research through bounded Computer Use; and
+- three TradingView chart reviews through bounded Computer Use, each tied to an
+  explicit ticker, venue, timeframe, and required indicator preset.
+
+Each branch produces a declared structured report and evidence artifacts. A
+highest-intelligence Agent consumes the six named reports, identifies conflicts
+and missing or stale evidence, and emits a candidate. A separate deterministic
+validator independently hashes and checks the evidence, then atomically writes
+`signals-and-orders.json`. In v0.4, every order is a proposal. The workflow has
+no authority to submit, stage, or transmit an order, connect a broker, or click
+a trading control.
+
+Computer Use is a desktop-owned specialized editor and runtime adapter. It
+compiles to the same direct executable-and-argument process contract as every
+other block. Browser origins, actions, evidence requirements, timeouts, and
+output paths are visible before execution. Browser automation concepts and
+site-specific behavior do not enter `packages/engine`.
+
+The controller is the non-interactive, headless `codex exec` CLI. Browser
+visibility is an independent upstream MCP setting: visible-browser evidence is
+accepted first, and fully headless browser operation is enabled only after
+evidence parity is demonstrated. In both modes a policy proxy, not the model,
+enforces exact tool, HTTPS-origin, action-budget, timeout, and process-tree
+boundaries.
+
+Web pages, posts, search results, chart labels, and other retrieved content are
+untrusted workflow input. They can contribute evidence but cannot expand tool
+authority, change the workflow instruction, choose a new origin, or authorize an
+action. Authentication remains owned by a dedicated user-controlled browser
+profile or local CLI and is never embedded in a workflow definition or run
+artifact.
+
+The v0.4 product and acceptance contract is maintained in
+`docs/roadmap/V0_4_TARGETS.md` and `docs/acceptance/V0_4.md`.
+
 ## Safety and trust boundaries
 
 Vorchestra workflows are executable code. A visual representation does not make
@@ -373,10 +417,16 @@ cite the decision it changes.
 | VOR-028 | 2026-07-10 | Keep one-shot direct-process execution as the required v0.3 Agent shape; exclude native Cline SDK and required interactive PTY integration.                                                             | Direct compilation preserves the generic process contract while avoiding provider stores, OAuth, chat-session ownership, and terminal lifecycle semantics that the release does not need. |
 | VOR-029 | 2026-07-10 | Add explicit run-scoped Git-worktree isolation for v0.3, shared by ordered Agent blocks; reject parallel writers in one scope and perform no automatic merge, commit, push, PR, or destructive cleanup. | Sequential agents can collaborate on repository changes while worktree creation and Git authority remain visible, bounded, and outside engine scheduling semantics.                       |
 | VOR-030 | 2026-07-10 | Add desktop-owned runtime capability metadata for model, instruction-delivery, authority, and optional lifecycle differences, with no hidden prompt mutation.                                           | Settings proven by multiple runtimes can vary honestly while the compiled generic process, visible effective invocation, and runtime-owned authentication remain authoritative.           |
+| VOR-031 | 2026-07-16 | Target bounded Computer Use as a desktop-owned specialized editor for v0.4, compiling to a direct generic process with no browser concepts in the engine.                                               | Browser-operated applications are valuable local capabilities, but provider-specific navigation and authority belong outside portable scheduling semantics.                               |
+| VOR-032 | 2026-07-16 | Treat retrieved web content as untrusted evidence that cannot mutate instructions, origins, tool grants, or execution authority.                                                                        | Prompt injection and hostile page content must not be able to widen a reviewed workflow's authority.                                                                                      |
+| VOR-033 | 2026-07-16 | Limit the v0.4 fintech workflow to research, signals, and proposed orders with `execution_authority: "none"`; forbid brokerage connection and order submission.                                         | The release should prove multi-source decision support without conflating model output with permission to trade.                                                                          |
+| VOR-034 | 2026-07-16 | Admit third-party research CLIs only as pinned, locally audited builds invoked through a read-only command allowlist; never expose their account-mutating commands to an Agent.                         | `rdt-cli` and `twitter-cli` include cookie access and write operations, so a raw executable in unrestricted Agent authority would exceed the workflow's research purpose.                 |
+| VOR-035 | 2026-07-16 | Require each research branch and the final decision artifact to carry timestamps, provenance, and typed completeness or freshness failures.                                                             | Financial analysis is unsafe to interpret when its evidence identity, observation time, or missing-source state is implicit.                                                              |
+| VOR-036 | 2026-07-16 | Use non-interactive `codex exec` as the Computer Use controller behind an MCP policy proxy; treat browser visible/headless mode as a separately accepted backend property.                              | Codex CLI can orchestrate browser tools without an interactive terminal, while deterministic proxy enforcement prevents model or page content from widening reviewed authority.           |
 
 ## Open questions
 
-These questions concern post-v0.2 direction or later implementation validation.
+These questions concern later implementation validation or post-v0.4 direction.
 They do not block the current release contract.
 
 - What is the smallest useful sandboxing or capability-grant model after v0.2?
@@ -386,6 +436,10 @@ They do not block the current release contract.
 - What explicit iteration model, if any, should eventually permit cycles?
 - Which artifact kinds should follow filesystem references: managed files,
   streams, binary blobs, or structured datasets?
+- What separately reviewed authority and deterministic risk controls would be
+  required before any future release could transmit an order proposal?
+- Which browser isolation mechanism can provide a portable hard network-origin
+  boundary in addition to the v0.4 adapter's action and origin allowlists?
 
 ## Update policy
 

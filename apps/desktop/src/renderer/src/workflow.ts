@@ -7,6 +7,7 @@ import type {
 } from '@vorchestra/engine';
 import type { ProcessFlowNode } from './ProcessNode';
 import { getAgentBlockPresentation } from '../../shared/agent-runtime';
+import { getComputerUseBlockPresentation } from '../../shared/computer-use-runtime';
 
 export interface ProcessBlockClipboard {
   readonly block: ProcessBlock;
@@ -289,6 +290,10 @@ export function reconcileProcessNodes(
   return workflow.blocks.map((block, index) => {
     const current = currentById.get(block.id);
     const presentation = getAgentBlockPresentation(workflow, block.id);
+    const computerUsePresentation = getComputerUseBlockPresentation(
+      workflow,
+      block.id,
+    );
     return {
       ...current,
       id: block.id,
@@ -303,6 +308,9 @@ export function reconcileProcessNodes(
         ...(presentation === undefined
           ? {}
           : { agentRuntime: presentation.agentRuntime }),
+        ...(computerUsePresentation === undefined
+          ? {}
+          : { presentationKind: 'computer-use' as const }),
       },
     };
   });

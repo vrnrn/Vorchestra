@@ -39,9 +39,20 @@ export interface UserToolModelCatalog {
   readonly models: readonly string[];
 }
 
+export interface UserCodexIntelligenceProfile {
+  readonly name: string;
+  readonly model: string;
+  readonly reasoningEffort: string;
+}
+
+export interface UserCodexModelCatalog extends UserToolModelCatalog {
+  /** User-owned labels that resolve to exact visible invocation settings. */
+  readonly intelligenceProfiles?: readonly UserCodexIntelligenceProfile[];
+}
+
 export interface UserModelCatalog {
   readonly schemaVersion: 1;
-  readonly codex: UserToolModelCatalog;
+  readonly codex: UserCodexModelCatalog;
   readonly cline: UserToolModelCatalog;
   readonly agy: UserToolModelCatalog;
 }

@@ -21,6 +21,8 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 const identifierSchema = z.string().trim().min(1);
 
+const MAX_PROCESS_TIMEOUT_MS = 2_147_483_647;
+
 export const processTemplateInputSchema = z.union([
   z
     .object({
@@ -242,6 +244,12 @@ export const processInvocationSchema = z
     executable: z.string().trim().min(1),
     arguments: z.array(argumentSchema).default([]),
     workingDirectory: z.string().trim().min(1).optional(),
+    timeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(MAX_PROCESS_TIMEOUT_MS)
+      .optional(),
     environment: environmentRecordSchema
       .optional()
       .transform(

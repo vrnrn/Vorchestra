@@ -567,6 +567,9 @@ function resolveRunRequest(
     arguments: resolvedArguments,
     shell: block.invocation.shell,
     ...(workingDirectory === undefined ? {} : { workingDirectory }),
+    ...(block.invocation.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: block.invocation.timeoutMs }),
     environment,
     ...(stdin === undefined ? {} : { stdin }),
     outputs: resolveOutputSpecs(block),

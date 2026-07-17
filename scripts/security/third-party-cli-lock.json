@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "id": "rdt-cli",
+      "repository": "https://github.com/public-clis/rdt-cli.git",
+      "commit": "5e4fb3720d5c174e976cd425ccc3b879d52cac66",
+      "packageDirectory": "rdt_cli",
+      "distribution": "rdt-cli",
+      "buildBackend": "hatchling.build",
+      "knownAuthorityRisks": [
+        "Reads browser cookies and can persist Reddit credentials",
+        "Contains account-mutating vote, save, subscribe, and comment commands",
+        "Contains a platform URL opener that uses subprocess shell mode on Windows"
+      ]
+    },
+    {
+      "id": "twitter-cli",
+      "repository": "https://github.com/public-clis/twitter-cli.git",
+      "commit": "7c634e0d396b1e7af9f63315b414925fe4f29ae7",
+      "packageDirectory": "twitter_cli",
+      "distribution": "twitter-cli",
+      "buildBackend": "hatchling.build",
+      "knownAuthorityRisks": [
+        "Reads browser cookies and forwards authenticated X session material",
+        "Contains post, reply, delete, like, retweet, bookmark, follow, and unfollow commands",
+        "Uses a subprocess fallback for browser-cookie extraction"
+      ]
+    }
+  ]
+}

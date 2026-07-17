@@ -654,6 +654,23 @@ test('rejects missing, mismatched, and unknown run inputs before invoking the ru
   assert.equal(calls, 0);
 });
 
+test('passes a configured timeout through the portable process request', async () => {
+  const block = processBlock('bounded', [], []);
+  block.invocation.timeoutMs = 12_345;
+  let request: ProcessRunRequest | undefined;
+
+  await executeWorkflow(
+    workflowWith([block]),
+    runnerFrom(async (nextRequest) => {
+      request = nextRequest;
+      return succeeded(nextRequest);
+    }),
+    { runId: 'bounded-process' },
+  );
+
+  assert.equal(request?.timeoutMs, 12_345);
+});
+
 test('routes all workflow input kinds with explicit supplied provenance', async () => {
   const block = processBlock(
     'consumer',

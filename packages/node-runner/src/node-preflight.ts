@@ -182,6 +182,9 @@ export class NodeWorkflowPreflight implements WorkflowPreflightAdapter {
         ...(resolvedExecutable === undefined ? {} : { resolvedExecutable }),
         workingDirectory,
         shell: block.invocation.shell,
+        ...(block.invocation.timeoutMs === undefined
+          ? {}
+          : { timeoutMs: block.invocation.timeoutMs }),
         outputs: outputPreviews,
       });
     }

@@ -44,6 +44,48 @@ test('parses a versioned workflow and applies safe invocation defaults', () => {
     Object.keys(workflow.blocks[0]?.invocation.environment ?? {}),
     [],
   );
+  assert.equal(workflow.blocks[0]?.invocation.timeoutMs, undefined);
+});
+
+test('parses a bounded process timeout and rejects invalid timeout values', () => {
+  const serialized = {
+    schemaVersion: 2,
+    id: 'timeout-contract',
+    name: 'Timeout contract',
+    inputs: [],
+    inputBindings: [],
+    blocks: [
+      {
+        id: 'bounded',
+        name: 'Bounded process',
+        kind: 'process',
+        inputs: [],
+        outputs: [],
+        invocation: {
+          executable: 'fixture-process',
+          timeoutMs: 30_000,
+        },
+      },
+    ],
+    connections: [],
+  };
+
+  const workflow = parseWorkflowDefinition(serialized);
+  assert.equal(workflow.blocks[0]?.invocation.timeoutMs, 30_000);
+
+  for (const timeoutMs of [0, -1, 1.5, 2_147_483_648]) {
+    assert.throws(() =>
+      parseWorkflowDefinition({
+        ...serialized,
+        blocks: [
+          {
+            ...serialized.blocks[0],
+            invocation: { ...serialized.blocks[0]?.invocation, timeoutMs },
+          },
+        ],
+      }),
+    );
+  }
 });
 
 test('migrates the locked v1 fixture to the canonical v2 schema', async () => {

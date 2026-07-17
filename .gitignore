@@ -5,6 +5,10 @@ out/
 release/
 coverage/
 *.log
+page-*.yml
+page-*.png
+element-*.png
+/examples/fintech-signal-desk/
 *.tsbuildinfo
 .env
 .env.*

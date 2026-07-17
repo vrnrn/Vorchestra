@@ -61,7 +61,7 @@ export const AGENT_RUNTIME_REGISTRY: readonly AgentRuntimeDescriptor[] = [
       authorities: ['read-only', 'workspace-write'],
       declaredFilesystemOutputs: true,
       images: false,
-      structuredEvents: false,
+      structuredEvents: true,
       sessionResume: false,
     },
     installGuidance: 'Install the Codex CLI and ensure `codex` is on PATH.',
@@ -134,6 +134,15 @@ export interface AgentTextContextConfig {
   readonly name: string;
 }
 
+export interface AgentNamedContextConfig {
+  readonly portId: string;
+  readonly name: string;
+  readonly artifactKind: 'text' | 'json';
+  /** Placeholder name used by the visible deterministic instruction template. */
+  readonly templateKey: string;
+  readonly required?: boolean;
+}
+
 export interface AgentTextResponseConfig {
   readonly portId: string;
   readonly name: string;
@@ -169,7 +178,23 @@ export interface AgentBlockEditorConfig {
   readonly instructionDelivery?: AgentInstructionDeliveryMode;
   readonly instructionTemplate?: string;
   readonly model?: string;
+  /** Codex-only, emitted as an exact model_reasoning_effort config override. */
+  readonly reasoningEffort?: string;
+  /** Codex-only. Defaults to true when omitted for legacy workflow compatibility. */
+  readonly ephemeral?: boolean;
+  /** Codex-only JSONL event stream on stdout. */
+  readonly jsonl?: boolean;
+  /** Codex-only path to a JSON Schema passed through --output-schema. */
+  readonly outputSchemaPath?: string;
+  /** Codex-only path receiving the final assistant message. */
+  readonly outputLastMessagePath?: string;
   readonly isolation?: AgentIsolationConfig;
+  /**
+   * Canonical multi-input configuration. `textContext` remains readable for
+   * v0.3 workflow reconstruction and is normalized into this shape at compile
+   * time.
+   */
+  readonly contexts?: readonly AgentNamedContextConfig[];
   readonly textContext?: AgentTextContextConfig;
   readonly workingDirectory?: string;
   readonly authority: AgentAuthority;
@@ -196,7 +221,7 @@ const desktopEditorKey = 'vorchestra.desktop';
 
 interface DesktopEditorMetadata {
   readonly schemaVersion: 1;
-  readonly blockPresentations: Readonly<Record<string, AgentBlockPresentation>>;
+  readonly blockPresentations: Readonly<Record<string, JsonValue>>;
 }
 
 /** Compile a desktop AI Agent configuration into the generic engine contract. */
@@ -221,7 +246,7 @@ export function getAgentBlockPresentation(
   const metadata = parseDesktopEditorMetadata(
     workflow.editor?.[desktopEditorKey],
   );
-  return metadata?.blockPresentations[blockId];
+  return parseAgentBlockPresentation(metadata?.blockPresentations[blockId]);
 }
 
 export function getAgentBlockMetadataIssue(
@@ -275,7 +300,7 @@ export function setAgentBlockPresentation(
         kind: 'ai-agent',
         agentRuntime,
         ...(isolation === undefined ? {} : { isolation }),
-      },
+      } as unknown as JsonValue,
     },
   };
   return {
@@ -332,6 +357,10 @@ export function agentEditorConfigFromBlock(
     arguments_,
   );
   const model = optionValue(arguments_, '--model');
+  const reasoningEffort = codexConfigValue(
+    arguments_,
+    'model_reasoning_effort',
+  );
   const textBinding = block.invocation.outputs.find(
     (output) => output.type === 'stdout',
   );
@@ -346,6 +375,24 @@ export function agentEditorConfigFromBlock(
         ? templateArgument.inputs.context.portId
         : undefined;
   const stdinPort = block.inputs.find((input) => input.id === contextPortId);
+  const templateContexts = Object.entries(templateArgument?.inputs ?? {})
+    .filter(([key, binding]) => key !== 'instruction' && 'portId' in binding)
+    .flatMap(([templateKey, binding]) => {
+      if (!('portId' in binding)) return [];
+      const port = block.inputs.find((input) => input.id === binding.portId);
+      if (port === undefined || port.artifactKind === 'filesystem-reference') {
+        return [];
+      }
+      return [
+        {
+          portId: port.id,
+          name: port.name,
+          artifactKind: port.artifactKind,
+          templateKey,
+          required: port.required,
+        } satisfies AgentNamedContextConfig,
+      ];
+    });
   const templateInstruction = templateArgument?.inputs.instruction;
   const migrateClineStdinContext =
     presentation.agentRuntime === 'cline' &&
@@ -372,12 +419,56 @@ export function agentEditorConfigFromBlock(
           instructionTemplate: templateArgument.template,
         }),
     ...(model === undefined ? {} : { model }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(presentation.agentRuntime !== 'codex' ||
+    arguments_.includes('--ephemeral')
+      ? {}
+      : { ephemeral: false }),
+    ...(presentation.agentRuntime === 'codex' && arguments_.includes('--json')
+      ? { jsonl: true }
+      : {}),
+    ...(presentation.agentRuntime === 'codex' &&
+    optionValue(arguments_, '--output-schema') !== undefined
+      ? { outputSchemaPath: optionValue(arguments_, '--output-schema')! }
+      : {}),
+    ...(presentation.agentRuntime === 'codex' &&
+    optionValue(arguments_, '--output-last-message') !== undefined
+      ? {
+          outputLastMessagePath: optionValue(
+            arguments_,
+            '--output-last-message',
+          )!,
+        }
+      : {}),
     ...(presentation.isolation === undefined
       ? {}
       : { isolation: presentation.isolation }),
-    ...(stdinPort === undefined
-      ? {}
-      : { textContext: { portId: stdinPort.id, name: stdinPort.name } }),
+    ...(templateContexts.length === 1 &&
+    templateContexts[0]?.templateKey === 'context' &&
+    templateContexts[0]?.artifactKind === 'text'
+      ? {
+          textContext: {
+            portId: templateContexts[0].portId,
+            name: templateContexts[0].name,
+          },
+        }
+      : templateContexts.length > 0
+        ? { contexts: templateContexts }
+        : stdinPort === undefined
+          ? {}
+          : stdinPort.artifactKind === 'text'
+            ? { textContext: { portId: stdinPort.id, name: stdinPort.name } }
+            : {
+                contexts: [
+                  {
+                    portId: stdinPort.id,
+                    name: stdinPort.name,
+                    artifactKind: 'json' as const,
+                    templateKey: 'context',
+                    required: stdinPort.required,
+                  },
+                ],
+              }),
     ...(block.invocation.workingDirectory === undefined
       ? {}
       : { workingDirectory: block.invocation.workingDirectory }),
@@ -531,6 +622,12 @@ export function withResolvedAgentWorkingDirectory(
 function assertSupportedConfiguration(config: AgentBlockEditorConfig): void {
   const descriptor = getAgentRuntimeDescriptor(config.agentRuntime);
   const delivery = config.instructionDelivery ?? 'argument';
+  if (config.contexts !== undefined && config.textContext !== undefined) {
+    throw new Error(
+      'Use either named Agent contexts or the legacy text context, not both.',
+    );
+  }
+  const contexts = namedContexts(config);
   if (!descriptor.capabilities.instructionDeliveryModes.includes(delivery)) {
     throw new Error(
       `${descriptor.displayName} does not support ${delivery} instruction delivery. Choose ${descriptor.capabilities.instructionDeliveryModes.join(' or ')}.`,
@@ -547,13 +644,65 @@ function assertSupportedConfiguration(config: AgentBlockEditorConfig): void {
     );
   }
   if (
-    config.textContext !== undefined &&
+    contexts.length > 0 &&
     !descriptor.capabilities.separateTextContext &&
     delivery !== 'template'
   ) {
     throw new Error(
       `${descriptor.displayName} cannot receive separate connected text context in one-shot mode.`,
     );
+  }
+  if (contexts.length > 1 && delivery !== 'template') {
+    throw new Error(
+      'Multiple named contexts require visible deterministic template instruction delivery.',
+    );
+  }
+  const portIds = contexts.map((context) => context.portId);
+  const templateKeys = contexts.map((context) => context.templateKey);
+  if (new Set(portIds).size !== portIds.length) {
+    throw new Error('Connected Agent context port IDs must be unique.');
+  }
+  if (new Set(templateKeys).size !== templateKeys.length) {
+    throw new Error('Connected Agent context template keys must be unique.');
+  }
+  if (
+    contexts.some(
+      (context) => !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(context.templateKey),
+    )
+  ) {
+    throw new Error(
+      'Connected Agent context template keys must be portable identifiers.',
+    );
+  }
+  if (
+    config.agentRuntime !== 'codex' &&
+    (config.reasoningEffort !== undefined ||
+      config.ephemeral !== undefined ||
+      config.jsonl !== undefined ||
+      config.outputSchemaPath !== undefined ||
+      config.outputLastMessagePath !== undefined)
+  ) {
+    throw new Error(
+      'Codex execution options can only be used by Codex Agents.',
+    );
+  }
+  if (
+    config.reasoningEffort !== undefined &&
+    config.reasoningEffort.trim() === ''
+  ) {
+    throw new Error('Codex reasoning effort cannot be empty.');
+  }
+  if (
+    config.outputSchemaPath !== undefined &&
+    config.outputSchemaPath.trim() === ''
+  ) {
+    throw new Error('Codex output schema path cannot be empty.');
+  }
+  if (
+    config.outputLastMessagePath !== undefined &&
+    config.outputLastMessagePath.trim() === ''
+  ) {
+    throw new Error('Codex final-message output path cannot be empty.');
   }
   if (delivery === 'template') {
     if (config.instructionTemplate === undefined) {
@@ -565,38 +714,25 @@ function assertSupportedConfiguration(config: AgentBlockEditorConfig): void {
     if (!template.includes('{{instruction}}')) {
       throw new Error('Instruction templates must include {{instruction}}.');
     }
-    if (config.textContext !== undefined && !template.includes('{{context}}')) {
-      throw new Error(
-        'Instruction templates with connected context must include {{context}}.',
-      );
-    }
-    if (config.textContext === undefined && template.includes('{{context}}')) {
-      throw new Error(
-        'Enable connected text context before using {{context}} in the instruction template.',
-      );
+    for (const context of contexts) {
+      if (!template.includes(`{{${context.templateKey}}}`)) {
+        throw new Error(
+          `Instruction templates with connected context must include {{${context.templateKey}}}.`,
+        );
+      }
     }
   }
 }
 
 function compileCodexAgentBlock(config: AgentBlockEditorConfig): ProcessBlock {
-  const textContext = config.textContext;
+  const contexts = namedContexts(config);
   const delivery = config.instructionDelivery ?? 'argument';
 
   return {
     id: config.id,
     name: config.name,
     kind: 'process',
-    inputs:
-      textContext === undefined
-        ? []
-        : [
-            {
-              id: textContext.portId,
-              name: textContext.name,
-              artifactKind: 'text',
-              required: false,
-            },
-          ],
+    inputs: contexts.map(contextInputPort),
     outputs: [
       {
         id: config.textResponse.portId,
@@ -619,9 +755,9 @@ function compileCodexAgentBlock(config: AgentBlockEditorConfig): ProcessBlock {
         HOME: { source: 'host', name: 'HOME' },
         PATH: { source: 'host', name: 'PATH' },
       },
-      ...(textContext === undefined || delivery === 'template'
+      ...(contexts.length !== 1 || delivery === 'template'
         ? {}
-        : { stdin: { portId: textContext.portId } }),
+        : { stdin: { portId: contexts[0]!.portId } }),
       shell: false,
       outputs: [
         { type: 'stdout', portId: config.textResponse.portId },
@@ -641,7 +777,7 @@ function codexArguments(
 ): ProcessBlock['invocation']['arguments'] {
   return [
     literal('exec'),
-    literal('--ephemeral'),
+    ...((config.ephemeral ?? true) ? [literal('--ephemeral')] : []),
     literal('--skip-git-repo-check'),
     literal('--sandbox'),
     literal(config.authority),
@@ -650,6 +786,24 @@ function codexArguments(
     ...(config.model === undefined
       ? []
       : [literal('--model'), literal(config.model)]),
+    ...(config.reasoningEffort === undefined
+      ? []
+      : [
+          literal('--config'),
+          literal(
+            `model_reasoning_effort=${JSON.stringify(config.reasoningEffort)}`,
+          ),
+        ]),
+    ...(config.outputSchemaPath === undefined
+      ? []
+      : [literal('--output-schema'), literal(config.outputSchemaPath)]),
+    ...(config.jsonl === true ? [literal('--json')] : []),
+    ...(config.outputLastMessagePath === undefined
+      ? []
+      : [
+          literal('--output-last-message'),
+          literal(config.outputLastMessagePath),
+        ]),
     agentInstructionArgument(config),
   ];
 }
@@ -694,23 +848,13 @@ function compileDirectAgentBlock(
   config: AgentBlockEditorConfig,
   invocation: Pick<ProcessBlock['invocation'], 'executable' | 'arguments'>,
 ): ProcessBlock {
-  const textContext = config.textContext;
+  const contexts = namedContexts(config);
   const delivery = config.instructionDelivery ?? 'argument';
   return {
     id: config.id,
     name: config.name,
     kind: 'process',
-    inputs:
-      textContext === undefined
-        ? []
-        : [
-            {
-              id: textContext.portId,
-              name: textContext.name,
-              artifactKind: 'text',
-              required: false,
-            },
-          ],
+    inputs: contexts.map(contextInputPort),
     outputs: [
       {
         id: config.textResponse.portId,
@@ -732,9 +876,9 @@ function compileDirectAgentBlock(
         HOME: { source: 'host', name: 'HOME' },
         PATH: { source: 'host', name: 'PATH' },
       },
-      ...(textContext === undefined || delivery === 'template'
+      ...(contexts.length !== 1 || delivery === 'template'
         ? {}
-        : { stdin: { portId: textContext.portId } }),
+        : { stdin: { portId: contexts[0]!.portId } }),
       shell: false,
       outputs: [
         { type: 'stdout', portId: config.textResponse.portId },
@@ -761,6 +905,26 @@ function optionValue(
 ): string | undefined {
   const index = arguments_.indexOf(option);
   return index < 0 ? undefined : arguments_[index + 1];
+}
+
+function codexConfigValue(
+  arguments_: readonly string[],
+  key: string,
+): string | undefined {
+  for (let index = 0; index < arguments_.length - 1; index += 1) {
+    if (arguments_[index] !== '--config' && arguments_[index] !== '-c')
+      continue;
+    const candidate = arguments_[index + 1]!;
+    if (!candidate.startsWith(`${key}=`)) continue;
+    const value = candidate.slice(key.length + 1);
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return typeof parsed === 'string' ? parsed : value;
+    } catch {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function instructionFromArguments(
@@ -806,10 +970,38 @@ function agentInstructionArgument(
     template: config.instructionTemplate!,
     inputs: {
       instruction: { value: config.instruction },
-      ...(config.textContext === undefined
-        ? {}
-        : { context: { portId: config.textContext.portId } }),
+      ...Object.fromEntries(
+        namedContexts(config).map((context) => [
+          context.templateKey,
+          { portId: context.portId },
+        ]),
+      ),
     },
+  };
+}
+
+function namedContexts(
+  config: AgentBlockEditorConfig,
+): readonly AgentNamedContextConfig[] {
+  if (config.contexts !== undefined) return config.contexts;
+  return config.textContext === undefined
+    ? []
+    : [
+        {
+          ...config.textContext,
+          artifactKind: 'text',
+          templateKey: 'context',
+          required: false,
+        },
+      ];
+}
+
+function contextInputPort(context: AgentNamedContextConfig) {
+  return {
+    id: context.portId,
+    name: context.name,
+    artifactKind: context.artifactKind,
+    required: context.required ?? false,
   };
 }
 
@@ -818,23 +1010,28 @@ function parseDesktopEditorMetadata(
 ): DesktopEditorMetadata | undefined {
   if (!isRecord(value) || value.schemaVersion !== 1) return undefined;
   if (!isRecord(value.blockPresentations)) return undefined;
-  const blockPresentations: Record<string, AgentBlockPresentation> = {};
-  for (const [blockId, candidate] of Object.entries(value.blockPresentations)) {
-    if (
-      isRecord(candidate) &&
-      candidate.kind === 'ai-agent' &&
-      isAgentRuntimeId(candidate.agentRuntime)
-    ) {
-      blockPresentations[blockId] = {
-        kind: 'ai-agent',
-        agentRuntime: candidate.agentRuntime,
-        ...(parseAgentIsolation(candidate.isolation) === undefined
-          ? {}
-          : { isolation: parseAgentIsolation(candidate.isolation)! }),
-      };
-    }
-  }
+  const blockPresentations: Record<string, JsonValue> = {
+    ...value.blockPresentations,
+  };
   return { schemaVersion: 1, blockPresentations };
+}
+
+function parseAgentBlockPresentation(
+  candidate: JsonValue | undefined,
+): AgentBlockPresentation | undefined {
+  if (
+    !isRecord(candidate) ||
+    candidate.kind !== 'ai-agent' ||
+    !isAgentRuntimeId(candidate.agentRuntime)
+  ) {
+    return undefined;
+  }
+  const isolation = parseAgentIsolation(candidate.isolation);
+  return {
+    kind: 'ai-agent',
+    agentRuntime: candidate.agentRuntime,
+    ...(isolation === undefined ? {} : { isolation }),
+  };
 }
 
 function parseAgentIsolation(

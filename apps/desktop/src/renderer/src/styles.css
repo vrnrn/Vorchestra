@@ -1356,6 +1356,56 @@ select:hover {
 .agent-inspector .inspector-section:first-child {
   border-top: 2px solid rgba(91, 166, 220, 0.65);
 }
+.computer-use-inspector .inspector-section:first-child {
+  border-top: 2px solid rgba(229, 183, 103, 0.65);
+}
+.section-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.authority-pill {
+  padding: 3px 5px;
+  border: 1px solid rgba(84, 199, 132, 0.22);
+  border-radius: 999px;
+  background: rgba(84, 199, 132, 0.06);
+  color: #67c991;
+  font-size: 7px;
+  letter-spacing: 0.07em;
+}
+.computer-use-boundary-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 9px;
+  border: 1px solid rgba(229, 183, 103, 0.2);
+  border-radius: 6px;
+  background: rgba(229, 183, 103, 0.045);
+  color: var(--amber);
+}
+.computer-use-boundary-card strong,
+.computer-use-boundary-card small {
+  display: block;
+}
+.computer-use-boundary-card strong {
+  margin-bottom: 3px;
+  color: #c6b083;
+  font-size: 9px;
+}
+.computer-use-boundary-card small {
+  color: #6f685b;
+  font-size: 8px;
+  line-height: 1.45;
+}
+.computer-use-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.computer-use-scope-grid .field {
+  min-width: 0;
+}
 .agent-context-toggle {
   display: flex;
   align-items: flex-start;

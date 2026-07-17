@@ -275,6 +275,109 @@ describe('AI Agent block editor', () => {
       },
     });
   });
+
+  it('resolves a user-owned highest-intelligence profile to exact visible Codex args', () => {
+    const onChange = vi.fn();
+    const { getByLabelText } = render(
+      <AgentBlockInspector
+        block={compileAgentBlock(config())}
+        presentation={{ kind: 'ai-agent', agentRuntime: 'codex' }}
+        onChange={onChange}
+        selectPath={vi.fn()}
+        modelCatalog={{
+          schemaVersion: 1,
+          codex: {
+            models: ['user/chief'],
+            intelligenceProfiles: [
+              {
+                name: 'highest intelligence',
+                model: 'user/chief',
+                reasoningEffort: 'xhigh',
+              },
+            ],
+          },
+          cline: { models: [] },
+          agy: { models: [] },
+        }}
+      />,
+    );
+
+    fireEvent.change(getByLabelText('Codex intelligence profile'), {
+      target: { value: '0' },
+    });
+    const values = onChange.mock.calls
+      .at(-1)?.[0]
+      .invocation.arguments.map(
+        (argument: { type: string; value?: string }) => argument.value,
+      );
+    expect(values).toContain('user/chief');
+    expect(values).toContain('model_reasoning_effort="xhigh"');
+  });
+
+  it('edits explicit Codex structured output settings', () => {
+    const onChange = vi.fn();
+    const configured = {
+      ...config(),
+      reasoningEffort: 'high',
+      jsonl: true,
+      outputSchemaPath: './schema.json',
+      outputLastMessagePath: './signals-and-orders.json',
+    } satisfies AgentBlockEditorConfig;
+    const { getByLabelText } = render(
+      <AgentBlockInspector
+        block={compileAgentBlock(configured)}
+        presentation={{ kind: 'ai-agent', agentRuntime: 'codex' }}
+        onChange={onChange}
+        selectPath={vi.fn()}
+      />,
+    );
+
+    expect(getByLabelText('Codex reasoning effort')).toHaveValue('high');
+    expect(getByLabelText('Codex JSONL events')).toBeChecked();
+    expect(getByLabelText('Codex output schema path')).toHaveValue(
+      './schema.json',
+    );
+    expect(getByLabelText('Codex final message output path')).toHaveValue(
+      './signals-and-orders.json',
+    );
+    fireEvent.click(getByLabelText('Ephemeral Codex session'));
+    expect(
+      onChange.mock.calls
+        .at(-1)?.[0]
+        .invocation.arguments.some(
+          (argument: { type: string; value?: string }) =>
+            argument.value === '--ephemeral',
+        ),
+    ).toBe(false);
+  });
+
+  it('adds a second named context and switches to an explicit multi-input template', () => {
+    const onChange = vi.fn();
+    const firstContext = {
+      ...config(),
+      textContext: { portId: 'context', name: 'Reddit report' },
+    } satisfies AgentBlockEditorConfig;
+    const { getByLabelText } = render(
+      <AgentBlockInspector
+        block={compileAgentBlock(firstContext)}
+        presentation={{ kind: 'ai-agent', agentRuntime: 'codex' }}
+        onChange={onChange}
+        selectPath={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(getByLabelText('Add Agent context input'));
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next.inputs).toHaveLength(2);
+    expect(next.invocation.stdin).toBeUndefined();
+    expect(next.invocation.arguments.at(-1)).toMatchObject({
+      type: 'template',
+      inputs: {
+        context: { portId: 'context' },
+        context_2: { portId: 'context-1' },
+      },
+    });
+  });
 });
 
 function config(): AgentBlockEditorConfig {

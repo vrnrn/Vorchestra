@@ -58,6 +58,7 @@ import {
   Info,
   Layers3,
   LoaderCircle,
+  MonitorUp,
   Network,
   PanelRightClose,
   Play,
@@ -92,8 +93,17 @@ import {
   type AgentBlockPresentation,
   type AgentRuntimeId,
 } from '../../shared/agent-runtime';
+import {
+  compileComputerUseBlock,
+  createDefaultComputerUseConfig,
+  getComputerUseBlockMetadataIssue,
+  getComputerUseBlockPresentation,
+  setComputerUseBlockPresentation,
+  type ComputerUseBlockPresentation,
+} from '../../shared/computer-use-runtime';
 import { createProcessBlock, createWorkflow } from '../../shared/defaults';
 import { AgentBlockInspector } from './AgentBlockInspector';
+import { ComputerUseBlockInspector } from './ComputerUseBlockInspector';
 import {
   clearWorkflowDraft,
   readWorkflowDraft,
@@ -168,8 +178,9 @@ export function App() {
     workflow.blocks[0]?.id ?? '',
   );
   const [blockClipboard, setBlockClipboard] = useState<ProcessBlockClipboard>();
-  const [blockClipboardPresentation, setBlockClipboardPresentation] =
-    useState<AgentBlockPresentation>();
+  const [blockClipboardPresentation, setBlockClipboardPresentation] = useState<
+    AgentBlockPresentation | ComputerUseBlockPresentation
+  >();
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('configure');
   const [snapshots, setSnapshots] = useState<
     Readonly<Record<string, BlockRunSnapshot>>
@@ -208,6 +219,14 @@ export function App() {
     selectedBlock === undefined
       ? undefined
       : getAgentBlockMetadataIssue(workflow, selectedBlock.id);
+  const selectedComputerUsePresentation =
+    selectedBlock === undefined
+      ? undefined
+      : getComputerUseBlockPresentation(workflow, selectedBlock.id);
+  const selectedComputerUseMetadataIssue =
+    selectedBlock === undefined
+      ? undefined
+      : getComputerUseBlockMetadataIssue(workflow, selectedBlock.id);
   const runInputBuild = useMemo(
     () => buildWorkflowRunInputs(workflow, runInputValues),
     [runInputValues, workflow],
@@ -288,7 +307,8 @@ export function App() {
       if (copied === undefined) return;
       setBlockClipboard(copied);
       setBlockClipboardPresentation(
-        getAgentBlockPresentation(workflow, blockId),
+        getAgentBlockPresentation(workflow, blockId) ??
+          getComputerUseBlockPresentation(workflow, blockId),
       );
       setNotice(`Copied ${copied.block.name}.`);
     },
@@ -322,15 +342,26 @@ export function App() {
       blockClipboard,
       position === undefined ? {} : { position },
     );
-    const nextWorkflow =
-      blockClipboardPresentation === undefined
-        ? pasted.workflow
-        : setAgentBlockPresentation(
-            pasted.workflow,
-            pasted.blockId,
-            blockClipboardPresentation.agentRuntime,
-            blockClipboardPresentation.isolation,
-          );
+    const nextWorkflow = (() => {
+      if (blockClipboardPresentation === undefined) return pasted.workflow;
+      if (blockClipboardPresentation.kind === 'computer-use') {
+        return setComputerUseBlockPresentation(
+          pasted.workflow,
+          pasted.blockId,
+          {
+            ...blockClipboardPresentation.config,
+            id: pasted.blockId,
+            name: blockClipboard.block.name,
+          },
+        );
+      }
+      return setAgentBlockPresentation(
+        pasted.workflow,
+        pasted.blockId,
+        blockClipboardPresentation.agentRuntime,
+        blockClipboardPresentation.isolation,
+      );
+    })();
     setHistory(pushWorkflowHistory(history, nextWorkflow));
     setSelectedBlockId(pasted.blockId);
     setInspectorTab('configure');
@@ -717,6 +748,38 @@ export function App() {
     setInspectorTab('configure');
   };
 
+  const addComputerUseBlock = (): void => {
+    const id = crypto.randomUUID();
+    const config = createDefaultComputerUseConfig({
+      id,
+      ...(userModelCatalog?.catalog.codex.default === undefined
+        ? {}
+        : { model: userModelCatalog.catalog.codex.default }),
+    });
+    const block = compileComputerUseBlock(config);
+    changeWorkflow((current) =>
+      setComputerUseBlockPresentation(
+        {
+          ...current,
+          blocks: [...current.blocks, block],
+          layout: {
+            blockPositions: {
+              ...(current.layout?.blockPositions ?? {}),
+              [id]: {
+                x: 180 + (current.blocks.length % 3) * 300,
+                y: 160 + Math.floor(current.blocks.length / 3) * 220,
+              },
+            },
+          },
+        },
+        id,
+        config,
+      ),
+    );
+    setSelectedBlockId(id);
+    setInspectorTab('configure');
+  };
+
   async function saveWorkflow(saveAs = false): Promise<void> {
     try {
       const result = await window.vorchestra.saveWorkflow({
@@ -956,6 +1019,20 @@ export function App() {
             <span>
               <strong>AI Agent</strong>
               <small>Codex Agent runtime</small>
+            </span>
+            <Plus size={15} />
+          </button>
+          <button
+            className="add-process add-agent"
+            aria-label="Add Computer Use"
+            onClick={addComputerUseBlock}
+          >
+            <span>
+              <MonitorUp size={17} />
+            </span>
+            <span>
+              <strong>Computer Use</strong>
+              <small>Codex + bounded browser MCP</small>
             </span>
             <Plus size={15} />
           </button>
@@ -1218,7 +1295,22 @@ export function App() {
                 }
               >
                 {inspectorTab === 'configure' ? (
-                  selectedPresentation === undefined ? (
+                  selectedComputerUsePresentation !== undefined ? (
+                    <ComputerUseBlockInspector
+                      block={selectedBlock}
+                      presentation={selectedComputerUsePresentation}
+                      selectPath={selectFilesystemPath}
+                      onChange={(block, presentation) =>
+                        changeWorkflow((current) =>
+                          setComputerUseBlockPresentation(
+                            replaceBlock(current, block),
+                            block.id,
+                            presentation.config,
+                          ),
+                        )
+                      }
+                    />
+                  ) : selectedPresentation === undefined ? (
                     selectedMetadataIssue?.code === 'runtime-unsupported' ? (
                       <UnsupportedAgentRuntimeInspector
                         issue={selectedMetadataIssue}
@@ -1250,26 +1342,35 @@ export function App() {
                         }
                       />
                     ) : (
-                      <BlockInspector
-                        block={selectedBlock}
-                        workflow={workflow}
-                        {...(preflight?.blocks.find(
-                          (block) => block.blockId === selectedBlock.id,
-                        ) === undefined
-                          ? {}
-                          : {
-                              resolved: preflight.blocks.find(
-                                (block) => block.blockId === selectedBlock.id,
-                              )!,
-                            })}
-                        selectPath={selectFilesystemPath}
-                        onChange={(block) =>
-                          changeWorkflow((current) =>
-                            replaceBlock(current, block),
-                          )
-                        }
-                        onWorkflowChange={(next) => changeWorkflow(() => next)}
-                      />
+                      <>
+                        {selectedComputerUseMetadataIssue !== undefined && (
+                          <div className="inline-notice error">
+                            {selectedComputerUseMetadataIssue.message}
+                          </div>
+                        )}
+                        <BlockInspector
+                          block={selectedBlock}
+                          workflow={workflow}
+                          {...(preflight?.blocks.find(
+                            (block) => block.blockId === selectedBlock.id,
+                          ) === undefined
+                            ? {}
+                            : {
+                                resolved: preflight.blocks.find(
+                                  (block) => block.blockId === selectedBlock.id,
+                                )!,
+                              })}
+                          selectPath={selectFilesystemPath}
+                          onChange={(block) =>
+                            changeWorkflow((current) =>
+                              replaceBlock(current, block),
+                            )
+                          }
+                          onWorkflowChange={(next) =>
+                            changeWorkflow(() => next)
+                          }
+                        />
+                      </>
                     )
                   ) : (
                     <AgentBlockInspector
@@ -3060,6 +3161,7 @@ export function runtimeFailureInspectorField(
     case 'process_authentication_failed':
       return agentBlock ? 'editor.agentRuntime' : 'invocation.executable';
     case 'process_exit_nonzero':
+    case 'process_timeout':
     case 'process_terminated_by_signal':
     case 'process_termination_failed':
       return 'invocation.arguments';

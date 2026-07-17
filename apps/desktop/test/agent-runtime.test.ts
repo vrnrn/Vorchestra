@@ -164,6 +164,118 @@ describe('Codex Agent runtime compiler', () => {
     expectValidStandaloneBlock(block);
   });
 
+  it('compiles six independently named text and JSON reports for a Chief Agent', () => {
+    const contexts = [
+      ['reddit', 'Reddit report', 'text'],
+      ['twitter', 'X report', 'json'],
+      ['finance', 'Finance report', 'json'],
+      ['chart_spx', 'SPX chart', 'json'],
+      ['chart_nvda', 'NVDA chart', 'json'],
+      ['chart_btc', 'BTC chart', 'text'],
+    ] as const;
+    const template = [
+      '{{instruction}}',
+      ...contexts.map(([key]) => `${key}:\n{{${key}}}`),
+    ].join('\n\n');
+    const config: AgentBlockEditorConfig = {
+      ...baseConfig('codex', 'Produce a proposal-only decision artifact.'),
+      instructionDelivery: 'template',
+      instructionTemplate: template,
+      contexts: contexts.map(([templateKey, name, artifactKind]) => ({
+        portId: templateKey,
+        name,
+        artifactKind,
+        templateKey,
+        required: true,
+      })),
+      model: 'user-owned-chief-model',
+      reasoningEffort: 'highest-user-setting',
+      jsonl: true,
+      outputSchemaPath: './schemas/signals-and-orders.schema.json',
+      outputLastMessagePath: './signals-and-orders.json',
+    };
+
+    const block = compileAgentBlock(config);
+
+    expect(block.inputs).toHaveLength(6);
+    expect(
+      block.inputs.map(({ id, artifactKind, required }) => ({
+        id,
+        artifactKind,
+        required,
+      })),
+    ).toEqual(
+      contexts.map(([id, , artifactKind]) => ({
+        id,
+        artifactKind,
+        required: true,
+      })),
+    );
+    expect(block.invocation.stdin).toBeUndefined();
+    expect(block.invocation.arguments.at(-1)).toEqual({
+      type: 'template',
+      template,
+      inputs: {
+        instruction: { value: config.instruction },
+        reddit: { portId: 'reddit' },
+        twitter: { portId: 'twitter' },
+        finance: { portId: 'finance' },
+        chart_spx: { portId: 'chart_spx' },
+        chart_nvda: { portId: 'chart_nvda' },
+        chart_btc: { portId: 'chart_btc' },
+      },
+    });
+    expect(argumentValues(block)).toEqual([
+      'exec',
+      '--ephemeral',
+      '--skip-git-repo-check',
+      '--sandbox',
+      'workspace-write',
+      '--color',
+      'never',
+      '--model',
+      'user-owned-chief-model',
+      '--config',
+      'model_reasoning_effort="highest-user-setting"',
+      '--output-schema',
+      './schemas/signals-and-orders.schema.json',
+      '--json',
+      '--output-last-message',
+      './signals-and-orders.json',
+      `template:${template}`,
+    ]);
+    expect(
+      agentEditorConfigFromBlock(block, {
+        kind: 'ai-agent',
+        agentRuntime: 'codex',
+      }),
+    ).toEqual(config);
+    expect(() =>
+      parseWorkflowDefinition({
+        schemaVersion: 1,
+        id: 'chief-workflow',
+        name: 'Chief workflow',
+        blocks: [block],
+        connections: [],
+      }),
+    ).not.toThrow();
+  });
+
+  it('makes a non-ephemeral Codex choice explicit and round-trippable', () => {
+    const config = {
+      ...baseConfig('codex', 'Return the result.'),
+      ephemeral: false,
+    } satisfies AgentBlockEditorConfig;
+    const block = compileAgentBlock(config);
+    expect(argumentValues(block)).not.toContain('--ephemeral');
+    expect(
+      agentEditorConfigFromBlock(block, {
+        kind: 'ai-agent',
+        agentRuntime: 'codex',
+      }),
+    ).toEqual(config);
+  });
+
   it('never emits model, streaming, resume, shell, worktree, or authority-bypass behavior', () => {
     const block = compileAgentBlock({
       id: 'bounded-agent',
@@ -486,6 +598,35 @@ describe('capability-aware Agent runtime registry', () => {
         textContext: { portId: 'context', name: 'Context' },
       }),
     ).toThrow('cannot receive separate connected text context');
+
+    expect(() =>
+      compileAgentBlock({
+        ...baseConfig('codex', 'Use these reports.'),
+        instructionDelivery: 'template',
+        instructionTemplate: '{{instruction}} {{same}}',
+        contexts: [
+          {
+            portId: 'one',
+            name: 'One',
+            artifactKind: 'text',
+            templateKey: 'same',
+          },
+          {
+            portId: 'two',
+            name: 'Two',
+            artifactKind: 'json',
+            templateKey: 'same',
+          },
+        ],
+      }),
+    ).toThrow('template keys must be unique');
+
+    expect(() =>
+      compileAgentBlock({
+        ...baseConfig('cline', 'Return events.'),
+        jsonl: true,
+      }),
+    ).toThrow('Codex execution options can only be used by Codex Agents');
   });
 
   it('round-trips runtime and explicit worktree isolation metadata', () => {
@@ -531,6 +672,29 @@ describe('capability-aware Agent runtime registry', () => {
     const recovered = removeBlockPresentation(workflow, 'welcome');
     expect(JSON.stringify(recovered.editor)).not.toContain('future-agent');
     expect(JSON.stringify(recovered.editor)).toContain('future-presentation');
+  });
+
+  it('preserves non-Agent presentation metadata when setting an Agent presentation', () => {
+    const workflow = {
+      ...createWorkflow(),
+      editor: {
+        'vorchestra.desktop': {
+          schemaVersion: 1,
+          blockPresentations: {
+            browser: {
+              kind: 'computer-use',
+              targetUrl: 'https://example.test',
+            },
+          },
+        },
+      },
+    };
+    const updated = setAgentBlockPresentation(workflow, 'chief', 'codex');
+    expect(JSON.stringify(updated.editor)).toContain('computer-use');
+    expect(getAgentBlockPresentation(updated, 'chief')).toEqual({
+      kind: 'ai-agent',
+      agentRuntime: 'codex',
+    });
   });
 });
 

@@ -481,6 +481,91 @@ test('cancels a running process and its POSIX process group', async () => {
   }
 });
 
+test('times out a running process and its POSIX process group', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'vorchestra-node-runner-'));
+  const pidFile = join(directory, 'timeout-descendant.pid');
+  let descendantPid: number | undefined;
+
+  try {
+    const result = await runner.run(
+      nodeRequest(
+        `
+          const { spawn } = require('node:child_process');
+          const fs = require('node:fs');
+          const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+          fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+          process.stdout.write('started');
+          setInterval(() => {}, 1000);
+        `,
+        { timeoutMs: 100 },
+      ),
+      unaborted(),
+    );
+
+    descendantPid = Number(await readFile(pidFile, 'utf8'));
+    assert.equal(result.status, 'failed');
+    if (result.status === 'failed') {
+      assert.equal(result.failure.code, 'process_timeout');
+      assert.match(result.failure.message, /100 ms/);
+      assert.match(result.failure.nextAction ?? '', /Increase/);
+    }
+    assert.equal(result.stdout, 'started');
+    if (process.platform !== 'win32') {
+      await waitForProcessExit(descendantPid);
+    }
+  } finally {
+    if (descendantPid !== undefined && isProcessAlive(descendantPid)) {
+      process.kill(descendantPid, 'SIGKILL');
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('leaves a process that finishes within its timeout unaffected', async () => {
+  const result = await runner.run(
+    nodeRequest("process.stdout.write('finished')", { timeoutMs: 1_000 }),
+    unaborted(),
+  );
+
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.stdout, 'finished');
+});
+
+test(
+  'user cancellation takes precedence after a timeout requests termination',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vorchestra-node-runner-'));
+    const readyFile = join(directory, 'timeout-ready');
+    const termFile = join(directory, 'timeout-term');
+    const controller = new AbortController();
+
+    try {
+      const resultPromise = runner.run(
+        nodeRequest(
+          `
+            const fs = require('node:fs');
+            process.on('SIGTERM', () => fs.writeFileSync(${JSON.stringify(termFile)}, 'term'));
+            fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');
+            setInterval(() => {}, 1000);
+          `,
+          { timeoutMs: 200 },
+        ),
+        { signal: controller.signal },
+      );
+
+      await waitForFile(readyFile);
+      await waitForFile(termFile);
+      controller.abort();
+      const result = await resultPromise;
+
+      assert.equal(result.status, 'cancelled');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 test(
   'escalates to SIGKILL when a POSIX process ignores SIGTERM',
   { skip: process.platform === 'win32' },

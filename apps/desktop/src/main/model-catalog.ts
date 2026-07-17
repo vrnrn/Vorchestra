@@ -69,7 +69,11 @@ function parseToolCatalog(
   if (!isRecord(input)) {
     throw new Error(`${tool} must contain a models array.`);
   }
-  if (Object.keys(input).some((key) => !['default', 'models'].includes(key))) {
+  const allowedFields =
+    tool === 'codex'
+      ? ['default', 'models', 'intelligenceProfiles']
+      : ['default', 'models'];
+  if (Object.keys(input).some((key) => !allowedFields.includes(key))) {
     throw new Error(`${tool} contains an unsupported field.`);
   }
   if (!Array.isArray(input.models)) {
@@ -90,10 +94,60 @@ function parseToolCatalog(
   ) {
     throw new Error(`${tool}.default must name a model in ${tool}.models.`);
   }
+  const intelligenceProfiles =
+    tool === 'codex'
+      ? parseIntelligenceProfiles(input.intelligenceProfiles, models)
+      : undefined;
   return {
     models,
     ...(input.default === undefined ? {} : { default: input.default }),
+    ...(intelligenceProfiles === undefined ? {} : { intelligenceProfiles }),
   };
+}
+
+function parseIntelligenceProfiles(
+  input: unknown,
+  models: readonly string[],
+):
+  | readonly {
+      readonly name: string;
+      readonly model: string;
+      readonly reasoningEffort: string;
+    }[]
+  | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input)) {
+    throw new Error('codex.intelligenceProfiles must be an array.');
+  }
+  const profiles = input.map((profile) => {
+    if (
+      !isRecord(profile) ||
+      Object.keys(profile).some(
+        (key) => !['name', 'model', 'reasoningEffort'].includes(key),
+      ) ||
+      typeof profile.name !== 'string' ||
+      profile.name.trim() === '' ||
+      typeof profile.model !== 'string' ||
+      !models.includes(profile.model) ||
+      typeof profile.reasoningEffort !== 'string' ||
+      profile.reasoningEffort.trim() === ''
+    ) {
+      throw new Error(
+        'Each codex intelligence profile requires a unique non-empty name, a model from codex.models, and an exact non-empty reasoningEffort.',
+      );
+    }
+    return {
+      name: profile.name,
+      model: profile.model,
+      reasoningEffort: profile.reasoningEffort,
+    };
+  });
+  if (
+    new Set(profiles.map((profile) => profile.name)).size !== profiles.length
+  ) {
+    throw new Error('codex.intelligenceProfiles contains duplicate names.');
+  }
+  return profiles;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

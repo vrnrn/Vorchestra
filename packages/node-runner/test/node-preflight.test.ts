@@ -31,6 +31,7 @@ test('preflight performs zero process launches', async () => {
   try {
     const block = processBlock('safe', {
       executable: process.execPath,
+      timeoutMs: 2_500,
       arguments: [
         { type: 'literal', value: '-e' },
         {
@@ -48,6 +49,7 @@ test('preflight performs zero process launches', async () => {
 
     assert.equal(result.ready, true);
     assert.equal(result.blocks[0]?.resolvedExecutable, process.execPath);
+    assert.equal(result.blocks[0]?.timeoutMs, 2_500);
     await assert.rejects(readFile(marker, 'utf8'));
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -518,6 +520,7 @@ interface ProcessBlockOptions {
   readonly executable?: string;
   readonly arguments?: ProcessBlock['invocation']['arguments'];
   readonly workingDirectory?: string;
+  readonly timeoutMs?: number;
   readonly environment?: ProcessBlock['invocation']['environment'];
   readonly shell?: boolean;
   readonly inputs?: ProcessBlock['inputs'];
@@ -541,6 +544,9 @@ function processBlock(
       ...(options.workingDirectory === undefined
         ? {}
         : { workingDirectory: options.workingDirectory }),
+      ...(options.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: options.timeoutMs }),
       environment: options.environment ?? {},
       shell: options.shell ?? false,
       outputs: options.outputBindings ?? [],

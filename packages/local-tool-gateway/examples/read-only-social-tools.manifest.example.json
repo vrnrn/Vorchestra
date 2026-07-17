@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "tools": [
+    {
+      "name": "reddit_search",
+      "description": "Search public Reddit posts and return JSON. Read-only operation.",
+      "executable": "/absolute/path/to/rdt",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fixedArguments": ["search", "--json", "--subreddit", "stocks"],
+      "arguments": [
+        { "type": "input", "name": "query" },
+        { "type": "literal", "value": "--limit" },
+        { "type": "input", "name": "limit", "encoding": "json" }
+      ],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
+        },
+        "required": ["query", "limit"],
+        "additionalProperties": false
+      },
+      "isolatedHome": true,
+      "timeoutMs": 30000,
+      "maxOutputBytes": 2000000,
+      "output": "json"
+    },
+    {
+      "name": "twitter_search",
+      "description": "Search public X posts and return JSON. Read-only operation.",
+      "executable": "/absolute/path/to/twitter",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fixedArguments": ["search", "--json", "$SPX"],
+      "arguments": [
+        { "type": "literal", "value": "--max" },
+        { "type": "input", "name": "limit", "encoding": "json" }
+      ],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+        },
+        "required": ["limit"],
+        "additionalProperties": false
+      },
+      "environment": {
+        "inherit": [
+          "TWITTER_AUTH_TOKEN",
+          "TWITTER_CT0",
+          "TWITTER_BROWSER",
+          "TWITTER_CHROME_PROFILE"
+        ]
+      },
+      "isolatedHome": true,
+      "timeoutMs": 30000,
+      "maxOutputBytes": 2000000,
+      "output": "json"
+    }
+  ]
+}

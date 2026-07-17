@@ -1,0 +1,26 @@
+{
+  "name": "@vorchestra/fintech-decision-validator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "vorchestra-fintech-decision-validator": "./dist/src/cli.js",
+    "vorchestra-fintech-report-bundle": "./dist/src/bundle-cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "format": "prettier --write README.md package.json tsconfig.json src test",
+    "format:check": "prettier --check README.md package.json tsconfig.json src test",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

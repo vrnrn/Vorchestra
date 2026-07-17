@@ -301,8 +301,10 @@ async function runChildProcess(
     let stderr = '';
     let settled = false;
     let cancellationRequested = false;
+    let timeoutRequested = false;
     let terminationFailure: ExecutionFailure | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
+    let timeoutTimer: NodeJS.Timeout | undefined;
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -322,12 +324,12 @@ async function runChildProcess(
       settled = true;
       signal.removeEventListener('abort', requestCancellation);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       resolveResult(result);
     };
 
-    const requestCancellation = (): void => {
-      if (cancellationRequested || settled) return;
-      cancellationRequested = true;
+    const requestTermination = (): void => {
+      if (settled || forceKillTimer !== undefined) return;
       try {
         terminate(child, 'SIGTERM');
       } catch (error) {
@@ -355,8 +357,24 @@ async function runChildProcess(
       forceKillTimer.unref();
     };
 
+    const requestCancellation = (): void => {
+      if (settled) return;
+      cancellationRequested = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      requestTermination();
+    };
+
     signal.addEventListener('abort', requestCancellation, { once: true });
     if (signal.aborted) requestCancellation();
+
+    if (request.timeoutMs !== undefined && !cancellationRequested) {
+      timeoutTimer = setTimeout(() => {
+        if (settled || cancellationRequested) return;
+        timeoutRequested = true;
+        requestTermination();
+      }, request.timeoutMs);
+      timeoutTimer.unref();
+    }
 
     child.on('error', (error: NodeJS.ErrnoException) => {
       finish(failedResult(stdout, stderr, null, launchFailure(request, error)));
@@ -367,6 +385,15 @@ async function runChildProcess(
         finish(failedResult(stdout, stderr, exitCode, terminationFailure));
       } else if (cancellationRequested) {
         finish(cancelledResult(stdout, stderr, exitCode));
+      } else if (timeoutRequested) {
+        finish(
+          failedResult(stdout, stderr, exitCode, {
+            code: 'process_timeout',
+            message: `Process exceeded its timeout of ${request.timeoutMs} ms.`,
+            nextAction:
+              'Increase the process timeout or inspect why the process did not finish in time.',
+          }),
+        );
       } else if (signalCode !== null) {
         finish(
           failedResult(stdout, stderr, exitCode, {

@@ -19,6 +19,7 @@ import {
   type AgentFilesystemOutputConfig,
   type AgentIsolationConfig,
   type AgentInstructionDeliveryMode,
+  type AgentNamedContextConfig,
   type AgentRuntimeId,
 } from '../../shared/agent-runtime';
 import type { UserModelCatalog } from '../../shared/contracts';
@@ -62,6 +63,7 @@ export function AgentBlockInspector({
     reconstructed.model === undefined && configuredModels.default !== undefined
       ? { ...reconstructed, model: configuredModels.default }
       : reconstructed;
+  const contexts = configuredContexts(config);
   const runtime = getAgentRuntimeDescriptor(config.agentRuntime);
   const commit = (next: AgentBlockEditorConfig): void =>
     onChange(compileAgentBlock(next), presentationFromConfig(next));
@@ -87,7 +89,7 @@ export function AgentBlockInspector({
     else next.model = nextModels.default;
     if (
       !nextRuntime.capabilities.separateTextContext &&
-      next.textContext !== undefined &&
+      configuredContexts(next).length > 0 &&
       (next.instructionDelivery ?? 'argument') !== 'template'
     ) {
       next.instructionDelivery = 'template';
@@ -95,6 +97,13 @@ export function AgentBlockInspector({
     }
     if (!nextRuntime.capabilities.modelOverride) {
       delete next.model;
+    }
+    if (agentRuntime !== 'codex') {
+      delete next.reasoningEffort;
+      delete next.ephemeral;
+      delete next.jsonl;
+      delete next.outputSchemaPath;
+      delete next.outputLastMessagePath;
     }
     if (
       !nextRuntime.capabilities.instructionDeliveryModes.includes(
@@ -105,6 +114,13 @@ export function AgentBlockInspector({
         nextRuntime.capabilities.instructionDeliveryModes[0] ?? 'argument';
     }
     commit(next);
+  };
+
+  const setContexts = (
+    nextContexts: readonly AgentNamedContextConfig[],
+  ): void => {
+    const { textContext: _legacyTextContext, ...withoutLegacyContext } = config;
+    commit({ ...withoutLegacyContext, contexts: nextContexts });
   };
 
   return (
@@ -201,6 +217,117 @@ export function AgentBlockInspector({
             )}
           </>
         )}
+        {config.agentRuntime === 'codex' && (
+          <>
+            {(modelCatalog?.codex.intelligenceProfiles?.length ?? 0) > 0 && (
+              <label className="field">
+                <span>Intelligence profile</span>
+                <select
+                  aria-label="Codex intelligence profile"
+                  value={intelligenceProfileSelection(
+                    config,
+                    modelCatalog?.codex.intelligenceProfiles ?? [],
+                  )}
+                  onChange={(event) => {
+                    if (event.target.value === 'custom') return;
+                    const profile =
+                      modelCatalog?.codex.intelligenceProfiles?.[
+                        Number(event.target.value)
+                      ];
+                    if (profile !== undefined) {
+                      update({
+                        model: profile.model,
+                        reasoningEffort: profile.reasoningEffort,
+                      });
+                    }
+                  }}
+                >
+                  <option value="custom">Custom exact settings</option>
+                  {modelCatalog?.codex.intelligenceProfiles?.map(
+                    (profile, index) => (
+                      <option key={profile.name} value={index}>
+                        {profile.name}
+                      </option>
+                    ),
+                  )}
+                </select>
+                <small>
+                  User-owned labels resolve to the exact model and reasoning
+                  arguments shown below; no provider model is hidden in the
+                  workflow.
+                </small>
+              </label>
+            )}
+            <label className="field">
+              <span>Reasoning effort</span>
+              <input
+                aria-label="Codex reasoning effort"
+                value={config.reasoningEffort ?? ''}
+                placeholder="Use Codex configuration default"
+                onChange={(event) => {
+                  if (event.target.value === '') {
+                    removeSetting('reasoningEffort');
+                  } else {
+                    update({ reasoningEffort: event.target.value });
+                  }
+                }}
+              />
+              <small>Passed visibly as model_reasoning_effort.</small>
+            </label>
+            <label className="agent-context-toggle">
+              <input
+                type="checkbox"
+                aria-label="Ephemeral Codex session"
+                checked={config.ephemeral ?? true}
+                onChange={(event) =>
+                  update({ ephemeral: event.target.checked })
+                }
+              />
+              Do not persist the Codex session
+            </label>
+            <label className="agent-context-toggle">
+              <input
+                type="checkbox"
+                aria-label="Codex JSONL events"
+                checked={config.jsonl ?? false}
+                onChange={(event) => update({ jsonl: event.target.checked })}
+              />
+              Emit JSONL runtime events on stdout
+            </label>
+            <label className="field">
+              <span>Output schema path</span>
+              <input
+                aria-label="Codex output schema path"
+                value={config.outputSchemaPath ?? ''}
+                placeholder="Optional JSON Schema file"
+                onChange={(event) =>
+                  updateOptionalString(
+                    config,
+                    commit,
+                    'outputSchemaPath',
+                    event.target.value,
+                  )
+                }
+              />
+            </label>
+            <label className="field">
+              <span>Final message output path</span>
+              <input
+                aria-label="Codex final message output path"
+                value={config.outputLastMessagePath ?? ''}
+                placeholder="Optional generated response file"
+                onChange={(event) =>
+                  updateOptionalString(
+                    config,
+                    commit,
+                    'outputLastMessagePath',
+                    event.target.value,
+                  )
+                }
+              />
+            </label>
+          </>
+        )}
       </section>
 
       <section className="inspector-section">
@@ -219,10 +346,7 @@ export function AgentBlockInspector({
               if (instructionDelivery === 'template') {
                 update({
                   instructionDelivery,
-                  instructionTemplate:
-                    config.textContext === undefined
-                      ? '{{instruction}}'
-                      : CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+                  instructionTemplate: defaultInstructionTemplate(contexts),
                 });
                 return;
               }
@@ -239,8 +363,9 @@ export function AgentBlockInspector({
                 value={mode}
                 disabled={
                   mode !== 'template' &&
-                  config.textContext !== undefined &&
-                  !runtime.capabilities.separateTextContext
+                  (contexts.length > 1 ||
+                    (contexts.length > 0 &&
+                      !runtime.capabilities.separateTextContext))
                 }
               >
                 {instructionDeliveryLabel(mode)}
@@ -278,83 +403,145 @@ export function AgentBlockInspector({
               rows={5}
               value={
                 config.instructionTemplate ??
-                (config.textContext === undefined
-                  ? '{{instruction}}'
-                  : CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE)
+                defaultInstructionTemplate(contexts)
               }
               onChange={(event) =>
                 update({ instructionTemplate: event.target.value })
               }
             />
             <small>
-              Use {'{{instruction}}'} for the exact instruction and
-              {' {{context}}'} for the connected text. The resolved argument is
-              produced by the generic engine without hidden additions.
+              Use {'{{instruction}}'} for the exact instruction and each named
+              input placeholder shown below. The generic engine resolves this
+              visible template without hidden additions.
             </small>
           </label>
         )}
         {(runtime.capabilities.separateTextContext ||
           (config.instructionDelivery ?? 'argument') === 'template') && (
           <>
-            <label className="agent-context-toggle">
-              <input
-                data-inspector-field="invocation.stdin"
-                type="checkbox"
-                checked={config.textContext !== undefined}
-                onChange={(event) => {
-                  if (event.target.checked) {
-                    update({
-                      textContext: {
-                        portId: uniquePortId(block, 'context'),
-                        name: 'Context',
-                      },
+            <header>
+              <span>Named inputs</span>
+              <button
+                className="section-action"
+                aria-label="Add Agent context input"
+                onClick={() => {
+                  const nextContexts = [
+                    ...contexts,
+                    newNamedContext(block, contexts),
+                  ];
+                  const { textContext: _legacy, ...withoutLegacy } = config;
+                  commit({
+                    ...withoutLegacy,
+                    contexts: nextContexts,
+                    ...(nextContexts.length > 1 ||
+                    !runtime.capabilities.separateTextContext
+                      ? {
+                          instructionDelivery: 'template',
+                          instructionTemplate:
+                            defaultInstructionTemplate(nextContexts),
+                        }
+                      : {}),
+                  });
+                }}
+              >
+                <Plus size={13} /> Add
+              </button>
+            </header>
+            {contexts.map((context, index) => (
+              <div className="agent-output-row" key={context.portId}>
+                <input
+                  aria-label={
+                    contexts.length === 1
+                      ? 'Agent context input name'
+                      : `Agent context ${index + 1} name`
+                  }
+                  value={context.name}
+                  onChange={(event) =>
+                    setContexts(
+                      replaceContext(contexts, index, {
+                        name: event.target.value,
+                      }),
+                    )
+                  }
+                />
+                <select
+                  aria-label={`Agent context ${index + 1} artifact kind`}
+                  value={context.artifactKind}
+                  onChange={(event) =>
+                    setContexts(
+                      replaceContext(contexts, index, {
+                        artifactKind: event.target.value as 'text' | 'json',
+                      }),
+                    )
+                  }
+                >
+                  <option value="text">Text</option>
+                  <option value="json">JSON</option>
+                </select>
+                <input
+                  aria-label={`Agent context ${index + 1} template key`}
+                  value={context.templateKey}
+                  onChange={(event) => {
+                    const nextContexts = replaceContext(contexts, index, {
+                      templateKey: event.target.value,
+                    });
+                    const currentTemplate =
+                      config.instructionTemplate ??
+                      defaultInstructionTemplate(contexts);
+                    const nextTemplate = currentTemplate.replaceAll(
+                      `{{${context.templateKey}}}`,
+                      `{{${event.target.value}}}`,
+                    );
+                    const { textContext: _legacy, ...withoutLegacy } = config;
+                    commit({
+                      ...withoutLegacy,
+                      contexts: nextContexts,
+                      instructionTemplate: nextTemplate,
+                    });
+                  }}
+                />
+                <label>
+                  <input
+                    type="checkbox"
+                    aria-label={`Agent context ${index + 1} required`}
+                    checked={context.required ?? false}
+                    onChange={(event) =>
+                      setContexts(
+                        replaceContext(contexts, index, {
+                          required: event.target.checked,
+                        }),
+                      )
+                    }
+                  />
+                  Required
+                </label>
+                <button
+                  className="icon-button"
+                  aria-label={`Remove Agent context ${context.name}`}
+                  onClick={() => {
+                    const nextContexts = contexts.filter(
+                      (_, candidateIndex) => candidateIndex !== index,
+                    );
+                    const { textContext: _legacy, ...withoutLegacy } = config;
+                    commit({
+                      ...withoutLegacy,
+                      contexts: nextContexts,
                       ...((config.instructionDelivery ?? 'argument') ===
                       'template'
                         ? {
                             instructionTemplate:
-                              CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE,
+                              defaultInstructionTemplate(nextContexts),
                           }
                         : {}),
                     });
-                    return;
-                  }
-                  if (
-                    (config.instructionDelivery ?? 'argument') === 'template'
-                  ) {
-                    const { textContext: _textContext, ...withoutContext } =
-                      config;
-                    commit({
-                      ...withoutContext,
-                      instructionTemplate: '{{instruction}}',
-                    });
-                    return;
-                  }
-                  removeSetting('textContext');
-                }}
-              />
-              Accept optional connected text as separate context
-            </label>
-            {config.textContext !== undefined && (
-              <label className="field">
-                <span>Context input name</span>
-                <input
-                  data-inspector-field="editor.textContext.name"
-                  aria-label="Agent context input name"
-                  value={config.textContext.name}
-                  onChange={(event) =>
-                    update({
-                      textContext: {
-                        ...config.textContext!,
-                        name: event.target.value,
-                      },
-                    })
-                  }
-                />
-                <small>
-                  Instruction and connected context stay visibly distinct; no
-                  implicit prompt template is applied.
-                </small>
-              </label>
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+            {contexts.length === 0 && (
+              <div className="empty-line">No connected inputs declared</div>
             )}
           </>
         )}
@@ -663,6 +850,104 @@ function modelSelection(
   if (model === undefined) return 'runtime-default';
   const index = configuredModels.indexOf(model);
   return index < 0 ? 'custom' : `configured:${index}`;
+}
+
+function intelligenceProfileSelection(
+  config: AgentBlockEditorConfig,
+  profiles: readonly {
+    readonly model: string;
+    readonly reasoningEffort: string;
+  }[],
+): string {
+  const index = profiles.findIndex(
+    (profile) =>
+      profile.model === config.model &&
+      profile.reasoningEffort === config.reasoningEffort,
+  );
+  return index < 0 ? 'custom' : String(index);
+}
+
+function configuredContexts(
+  config: AgentBlockEditorConfig,
+): readonly AgentNamedContextConfig[] {
+  if (config.contexts !== undefined) return config.contexts;
+  return config.textContext === undefined
+    ? []
+    : [
+        {
+          ...config.textContext,
+          artifactKind: 'text',
+          templateKey: 'context',
+          required: false,
+        },
+      ];
+}
+
+function defaultInstructionTemplate(
+  contexts: readonly AgentNamedContextConfig[],
+): string {
+  if (contexts.length === 0) return '{{instruction}}';
+  if (
+    contexts.length === 1 &&
+    contexts[0]?.templateKey === 'context' &&
+    contexts[0]?.artifactKind === 'text'
+  ) {
+    return CONNECTED_CONTEXT_INSTRUCTION_TEMPLATE;
+  }
+  return [
+    '{{instruction}}',
+    '',
+    'Connected inputs:',
+    ...contexts.flatMap((context) => [
+      '',
+      `${context.name}:`,
+      `{{${context.templateKey}}}`,
+    ]),
+  ].join('\n');
+}
+
+function replaceContext(
+  contexts: readonly AgentNamedContextConfig[],
+  index: number,
+  patch: Partial<AgentNamedContextConfig>,
+): readonly AgentNamedContextConfig[] {
+  return contexts.map((context, candidateIndex) =>
+    candidateIndex === index ? { ...context, ...patch } : context,
+  );
+}
+
+function newNamedContext(
+  block: ProcessBlock,
+  contexts: readonly AgentNamedContextConfig[],
+): AgentNamedContextConfig {
+  const portId = uniquePortId(block, 'context');
+  let keyIndex = contexts.length + 1;
+  const keys = new Set(contexts.map((context) => context.templateKey));
+  while (keys.has(`context_${keyIndex}`)) keyIndex += 1;
+  return {
+    portId,
+    name: `Context ${contexts.length + 1}`,
+    artifactKind: 'text',
+    templateKey: `context_${keyIndex}`,
+    required: false,
+  };
+}
+
+function updateOptionalString<
+  Key extends 'outputSchemaPath' | 'outputLastMessagePath',
+>(
+  config: AgentBlockEditorConfig,
+  commit: (config: AgentBlockEditorConfig) => void,
+  key: Key,
+  value: string,
+): void {
+  if (value !== '') {
+    commit({ ...config, [key]: value });
+    return;
+  }
+  const next = { ...config };
+  delete next[key];
+  commit(next);
 }
 
 function updateFilesystemOutput(

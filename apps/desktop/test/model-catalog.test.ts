@@ -70,6 +70,53 @@ describe('user model catalog', () => {
     expect(result.issue).toContain('No configured models will be offered');
     expect(await readFile(filePath, 'utf8')).toBe('{ invalid json');
   });
+
+  it('accepts user-owned Codex intelligence profiles only with exact visible settings', () => {
+    const catalog = parseUserModelCatalog(
+      JSON.stringify({
+        schemaVersion: 1,
+        codex: {
+          models: ['local/chief', 'local/fast'],
+          intelligenceProfiles: [
+            {
+              name: 'highest intelligence',
+              model: 'local/chief',
+              reasoningEffort: 'xhigh',
+            },
+          ],
+        },
+        cline: { models: [] },
+        agy: { models: [] },
+      }),
+    );
+    expect(catalog.codex.intelligenceProfiles).toEqual([
+      {
+        name: 'highest intelligence',
+        model: 'local/chief',
+        reasoningEffort: 'xhigh',
+      },
+    ]);
+
+    expect(() =>
+      parseUserModelCatalog(
+        JSON.stringify({
+          schemaVersion: 1,
+          codex: {
+            models: ['local/chief'],
+            intelligenceProfiles: [
+              {
+                name: 'highest intelligence',
+                model: 'hidden/provider-model',
+                reasoningEffort: 'xhigh',
+              },
+            ],
+          },
+          cline: { models: [] },
+          agy: { models: [] },
+        }),
+      ),
+    ).toThrow('requires a unique non-empty name');
+  });
 });
 
 async function temporaryHome(): Promise<string> {

@@ -28,16 +28,12 @@ try {
   if (performanceAcceptance) {
     await runNode('scripts/performance-electron.mjs', String(port));
   } else {
-    await runNode(
-      'scripts/capture-electron.mjs',
-      String(port),
-      'docs/acceptance/V0_3_EDITOR.png',
-    );
     await runNode('scripts/smoke-electron.mjs', String(port));
+    await runNode('scripts/computer-use-electron.mjs', String(port));
     await runNode(
       'scripts/capture-electron.mjs',
       String(port),
-      'docs/acceptance/V0_3_DESKTOP.png',
+      'docs/acceptance/V0_4_COMPUTER_USE.png',
     );
 
     await stopElectron(child);

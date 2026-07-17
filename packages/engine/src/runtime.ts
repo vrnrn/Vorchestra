@@ -17,6 +17,7 @@ export type ExecutionFailureCode =
   | 'artifact_routing_failed'
   | 'process_launch_failed'
   | 'process_authentication_failed'
+  | 'process_timeout'
   | 'process_exit_nonzero'
   | 'process_terminated_by_signal'
   | 'process_termination_failed';

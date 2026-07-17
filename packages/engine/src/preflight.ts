@@ -39,6 +39,7 @@ export interface BlockPreflightPreview {
   readonly resolvedExecutable?: string;
   readonly workingDirectory: string;
   readonly shell: boolean;
+  readonly timeoutMs?: number;
   readonly outputs: readonly ResolvedFilesystemOutputPreview[];
 }
 

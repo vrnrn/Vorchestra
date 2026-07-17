@@ -21,6 +21,7 @@ export interface ProcessRunRequest {
   readonly arguments: readonly string[];
   readonly shell: boolean;
   readonly workingDirectory?: string;
+  readonly timeoutMs?: number;
   readonly environment: Readonly<Record<string, string>>;
   readonly stdin?: string;
   readonly outputs: readonly ProcessOutputSpec[];

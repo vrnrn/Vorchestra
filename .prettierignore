@@ -3,6 +3,9 @@ dist/
 out/
 release/
 coverage/
+page-*.yml
+page-*.png
+element-*.png
 package-lock.json
 apps/desktop/build/icon.svg
 apps/desktop/build/icon.icns
